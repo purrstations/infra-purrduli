@@ -1,16 +1,16 @@
 services:
-  backend:
-    image: ghcr.io/purrtein/backend:latest
-    env_file: .env
-    restart: unless-stopped
-    networks:
-      - internal
+  # backend:
+  #   image: ghcr.io/purrtein/backend:latest
+  #   env_file: .env
+  #   restart: unless-stopped
+  #   networks:
+  #     - internal
 
-  frontend:
-    image: ghcr.io/purrtein/frontend:latest
-    restart: unless-stopped
-    networks:
-      - internal
+  # frontend:
+  #   image: ghcr.io/purrtein/frontend:latest
+  #   restart: unless-stopped
+  #   networks:
+  #     - internal
 
   mqtt:
     image: emqx/emqx:latest
@@ -47,9 +47,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
-    depends_on:
-      - backend
-      - frontend
     networks:
       - internal
 
