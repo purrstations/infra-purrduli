@@ -175,8 +175,9 @@ void onFeedCommand(JsonDocument& doc) {
   time_t issuedAt = parseISO8601(doc["issued_at"]);
   if (now() - issuedAt > COMMAND_REPLAY_WINDOW_S) { publishFail(logId, "command_expired"); return; }
 
-  // 5. Concurrency
-  if (state == STREAMING)  { publishFail(logId, "busy_streaming"); return; }
+  // 5. Concurrency — feed BOLEH saat streaming (lihat contract §5)
+  //    Stepper, camera DMA, RTSP push paralel via peripheral + dual-core.
+  //    Yang tetap di-block: 2 feed bersamaan (1 motor 1 job).
   if (state == FEEDING)    { publishFail(logId, "busy_feeding"); return; }
 
   // 6. Rotation count validation
@@ -304,7 +305,7 @@ Konfigurasi awal:
 
 **Auto-stop:** start timer `duration_s` (default 300s). Saat habis → publish `stream_state: stopped, reason: timeout` → deinit. Mencegah bandwidth bleed kalau backend lupa stop.
 
-**Concurrency:** stream + stepper BOLEH bersamaan secara teknis, tapi bisa cause frame drop + getaran nge-blur kamera. Default: **tolak feed saat streaming** (lihat contract §5).
+**Concurrency:** stream + stepper BOLEH bersamaan — itu memang fitur yang diinginkan user (lihat reaksi kucing saat motor jalan). Stepper jalan via RMT/MCPWM peripheral, kamera capture via DMA, JPEG encode + RTSP push di core 0, MQTT di core 1 → tidak saling tabrak. Yang di-tolak hanya **2 feed bersamaan** (motor sama, 1 job aktif). Frame blur 1–2 detik saat motor jalan = acceptable. Vibration damper di mounting kamera mengurangi efek (urusan hardware). Lihat contract §5.
 
 ---
 

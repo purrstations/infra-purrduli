@@ -13,14 +13,14 @@
 | 3 | Topik `refill` hanya di firmware | Backend dapat **endpoint, worker, RefillLog model** |
 | 4 | LWT/retained tidak terhandle backend | Backend wajib **subscribe + parse retained status**, LWT contract diatur §3 |
 | 5 | `reason` enum tidak ada di backend | DB `feeding_logs.reason` + mapping → refund/retry/notif policy |
-| 6 | Concurrency cuma di firmware | Backend pre-flight cek `device.status` + `stream_status` sebelum enqueue |
+| 6 | Concurrency cuma di firmware | Backend pre-flight cek `device.status` sebelum enqueue. **Feed boleh saat streaming** (REVISED — user wajib bisa lihat reaksi kucing saat motor jalan; ESP32-S3 sanggup paralel via peripheral DMA + dual-core) |
 | 7 | Tidak ada refund | `refund-queue` + tabel `token_usages.refunded` + WS `feeding.failed` |
 | 8 | NTP cuma di firmware | Backend container `chrony` + skew-check, anti-replay 2-arah |
 | 9 | BLE provisioning tanpa endpoint backend | `POST /admin/devices` + `pairing-status` + `reset-secret` |
 | 10 | `total_rotations` tidak ada di backend | Tambah kolom mirror di `devices` + `feeding_logs` |
 | 11 | Stream lifecycle event hilang | Topic `events/stream_state` + worker poll mediamtx API |
 | 12 | TDD hanya di firmware | Section mandatory di semua 3 layer, target coverage explicit |
-| 13 | Frontend stack open | **Next.js 14 + RQ + Zustand + Axios** ditetapkan (D8) |
+| 13 | Frontend stack open | **React 18 + Vite 5 + React Router 6 + TanStack Query v5 + Axios** ditetapkan (D8). Zustand di-drop — server state cukup di RQ, client state minor pakai useState/Context |
 | 14 | WHEP URL plain | Signed token TTL 60s, mediamtx auth-hook ke backend |
 | 15 | Timezone tidak ditetapkan | UTC ISO8601 dengan `Z` |
 | 16 | Idempotency feed cuma optional | LRU 100 + persist NVS di firmware, `feeding_log_id` `@unique` di backend |
@@ -28,6 +28,19 @@
 | 18 | Anti-replay backend tidak jelas timer | `issued_at` + `deadline_at` eksplisit |
 | 19 | Stream URL credentials di MQTT command | Kredensial hardcoded di firmware via provisioning, command cuma trigger |
 | 20 | Heartbeat off-cycle | Wajib re-publish saat state berubah |
+
+---
+
+## 1.b Catatan Khusus: Concurrent Feed + Stream
+
+Sebelumnya rule "tolak feed saat streaming" diset untuk hindari **getaran kamera** dan **power sag**. Setelah ditinjau ulang dari sisi produk: justru momen feed = momen paling menarik untuk ditonton (reaksi kucing). Rule dihapus.
+
+**Konsekuensi yang harus dihandle hardware/QA, bukan firmware policy:**
+- **Power supply ≥ 3A peak** + decoupling cap 470 µF di rail stepper. Kalau supply marginal → camera reset / brown-out saat stepper jalan.
+- **Vibration damper** (rubber grommet) di mounting kamera. Tanpa ini, frame blur dan kemungkinan miscalibrate alignment optical jangka panjang.
+- **EMI shielding** kabel stepper twisted-pair + ferrite bead. Tanpa ini, WiFi RSSI bisa drop saat stepper aktif.
+
+QA wajib soak test 24 jam dengan skenario feed-saat-stream untuk validasi. Kalau hardware ternyata tidak sanggup → revisit rule ini, jadikan compile flag `#define BLOCK_FEED_DURING_STREAM` opsional, bukan default.
 
 ---
 

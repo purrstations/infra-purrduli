@@ -412,7 +412,7 @@ Job payload:
 
 Worker flow:
 1. Acquire Redis lock `lock:device:{device_id}` (SET NX EX 60).
-2. Cek `devices.status === 'online'` dan `stream_status === 'inactive'` — kalau tidak, release lock, fail dengan `DEVICE_BUSY` → enqueue refund.
+2. Cek `devices.status === 'online'` saja — kalau offline, release lock, fail dengan `DEVICE_OFFLINE` → enqueue refund. **Stream aktif tidak menghalangi feed** (lihat contract §5).
 3. Update `feeding_logs.status = 'sent'`, `sent_at = now()`.
 4. Publish MQTT `commands/feed` (lihat contract §4.2) — set `deadline_at = now + 30s`.
 5. Setup promise that resolves on:
@@ -422,7 +422,7 @@ Worker flow:
 7. Timeout/failed → update DB, **enqueue `refund-queue`**, emit WS `feeding.failed`, release lock.
 
 **Retry policy (untuk reason yang retry-able):**
-- `busy_streaming`, `busy_feeding`: retry 3x dengan backoff 30s/60s/120s.
+- `busy_feeding`: retry 3x dengan backoff 15s/30s/60s.
 - `time_not_synced`: retry 3x backoff 60s.
 - `motor_stall`, `insufficient_stock`, `invalid_payload`, `command_expired`: NO retry, langsung refund.
 - `duplicate`: success — device sudah eksekusi sebelumnya.

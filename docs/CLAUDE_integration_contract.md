@@ -121,6 +121,7 @@ payload: {"schema":1,"device_id":"{uuid}","online":false,"reason":"lwt","timesta
   "total_rotations": 8,
   "stock_level": 0.68,
   "duration_ms": 2300,
+  "stream_active": true,
   "reason": null,
   "timestamp": "2026-06-21T10:00:02.300Z"
 }
@@ -134,12 +135,13 @@ payload: {"schema":1,"device_id":"{uuid}","online":false,"reason":"lwt","timesta
 |---|---|---|
 | `motor_stall` | Stepper stall detect (timing/driver fault) | Mark feeding failed, refund token, alert admin |
 | `insufficient_stock` | `total_rotations >= STOCK_CAPACITY_ROTATIONS` | Mark feeding failed, refund token, alert admin (stock_empty) |
-| `busy_streaming` | Device sedang stream → tolak feed | Refund token, retry job 30s kemudian (max 3x) |
-| `busy_feeding` | Sedang menjalankan feed lain | Refund token, retry job 10s kemudian (max 3x) |
+| `busy_feeding` | Sedang menjalankan feed lain (cooldown belum lewat) | Refund token, retry job 10s kemudian (max 3x) |
 | `command_expired` | `issued_at` > 30s lalu | Refund token, NO retry (backend bug) |
 | `invalid_payload` | JSON malformed / field hilang / rotations > 5 | Refund token, NO retry, alert dev |
 | `time_not_synced` | NTP belum sync | Refund token, retry 60s kemudian (max 3x) |
 | `duplicate` | `feeding_log_id` sudah pernah diproses (echo) | NO refund, NO retry. Backend cek `feeding_logs.status` — sudah `completed` artinya OK |
+
+> **Catatan**: `busy_streaming` SUDAH DIHAPUS. Feed boleh jalan saat streaming aktif — itu memang fitur yang user inginkan (lihat reaksi kucing saat motor jalan). Field `stream_active` di payload `feeding_done` untuk catatan analitik saja.
 
 ### 4.4 `commands/stream` (backend → device)
 
@@ -221,14 +223,22 @@ Device handle: idempotency check via `refill_id`, set `total_rotations = 0`, per
 
 Backend WAJIB cek state device sebelum enqueue command. Firmware enforce ulang sebagai pertahanan terakhir.
 
+**Prinsip:** stepper, kamera, dan MQTT di ESP32-S3 jalan paralel via peripheral hardware + dual-core — secara teknis non-konflik. Yang dibatasi hanya operasi yang **memang** tidak boleh tumpang tindih (mis. 2 feed bersamaan di motor yang sama).
+
 | State device | `feed` cmd | `stream_start` cmd | `refill` cmd |
 |---|---|---|---|
 | IDLE | ✅ | ✅ | ✅ |
-| FEEDING | ❌ `busy_feeding` | ⏳ tolak `device_busy` | ✅ (queue setelah feed selesai) |
-| STREAMING | ❌ `busy_streaming` | `stream_stop` lalu start | ✅ |
+| FEEDING | ❌ `busy_feeding` (1 motor 1 job) | ⏳ tolak `device_busy` 5 detik | ✅ (queue setelah feed selesai) |
+| STREAMING | **✅ feed boleh** (vibration sedikit blur, itu fitur — user mau lihat reaksi kucing) | `stream_stop` lalu start ulang | ✅ |
+| FEEDING + STREAMING | ❌ `busy_feeding` (motor masih sibuk) | — | ✅ (queue) |
 | OFFLINE (>120s no heartbeat) | ❌ Backend tolak di endpoint `/feed` 503 | ❌ Backend tolak 503 | ❌ |
 
 Backend ambil `device.status`, `device.stream_status`, `device.last_seen` dari DB (cache 5s di Redis). Jika "stale" → fallback ke last MQTT retained `status`.
+
+**Hardware prerequisite untuk concurrent feed+stream:**
+- Power supply ≥ 3A peak (stepper 1–2A + ESP32 + camera).
+- Capacitor decoupling 470 µF di rail stepper (sudah di hardware section IoT doc).
+- Vibration damper di mounting kamera (rubber grommet) — supaya blur saat motor jalan minimal & tidak permanen miscalibrate alignment.
 
 ---
 
