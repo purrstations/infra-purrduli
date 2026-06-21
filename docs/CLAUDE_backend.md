@@ -80,6 +80,12 @@ model User {
   phone         String?
   password_hash String                          // argon2
   token_balance Int      @default(0)
+  display_handle String? @unique                // @ophir, default null pakai first name
+  avatar_url    String?
+  chat_muted_until DateTime?                    // auto-mute ekspirasi
+  chat_warn_count Int    @default(0)
+  banned        Boolean  @default(false)
+  privacy_show_in_viewers Boolean @default(true)
   created_at    DateTime @default(now())
   updated_at    DateTime @updatedAt
 
@@ -87,6 +93,9 @@ model User {
   usages        TokenUsage[]
   feedings      FeedingLog[]
   refresh_tokens RefreshToken[]
+  chats         ChatMessage[]
+  gifts         GiftTransaction[]
+  viewers       StreamViewer[]
 
   @@check(token_balance >= 0, name: "non_negative_balance")
 }
@@ -265,6 +274,176 @@ model RefillLog {
 }
 ```
 
+### `stream_sessions`
+
+Sesi streaming = scope untuk chat, gift, viewer. Saat stream stop → session closed, chat archived, viewer disconnect. `stream_id` di `commands/stream` (contract §4.4) = session id ini.
+
+```prisma
+model StreamSession {
+  id                   String   @id @default(uuid()) @db.Uuid
+  device_id            String   @db.Uuid
+  started_by           String?  @db.Uuid                  // null = auto, kalau admin trigger = admin_id
+  started_at           DateTime @default(now())
+  ended_at             DateTime?
+  ended_reason         String?                            // manual_stop|timeout|error|device_offline
+  peak_viewers         Int      @default(0)
+  total_unique_viewers Int      @default(0)
+  total_chats          Int      @default(0)
+  total_gifts          Int      @default(0)
+  total_gift_value     Int      @default(0)               // total token revenue dari gift
+
+  device   Device           @relation(fields: [device_id], references: [id])
+  chats    ChatMessage[]
+  gifts    GiftTransaction[]
+  viewers  StreamViewer[]
+
+  @@index([device_id, started_at(sort: Desc)])
+}
+```
+
+### `chat_messages`
+
+**Storage strategy:** hot path = Redis Streams `stream:chat:{session_id}` (last 200, TTL 24 jam atau session close). Cold archive = Postgres write-behind batch (100 row / 2 detik) via `chat-archive-queue`.
+
+```prisma
+model ChatMessage {
+  id          String   @id @default(uuid()) @db.Uuid
+  session_id  String   @db.Uuid
+  user_id     String   @db.Uuid
+  content     String   @db.VarChar(280)
+  type        String   @default("text")          // text|sticker|system
+  sticker_id  String?  @db.Uuid
+  deleted_at  DateTime?
+  deleted_by  String?  @db.Uuid                  // admin_id atau user (self-delete ≤5 menit)
+  flagged     Boolean  @default(false)
+  flag_reason String?
+  created_at  DateTime @default(now())
+
+  session StreamSession @relation(fields: [session_id], references: [id])
+  user    User          @relation(fields: [user_id], references: [id])
+  sticker Sticker?      @relation(fields: [sticker_id], references: [id])
+
+  @@index([session_id, created_at(sort: Desc)])
+  @@index([user_id, created_at(sort: Desc)])
+}
+```
+
+### `stickers` (catalog)
+
+Free: 5–10 standard (paw, heart, fish), rate limit 1/2 detik. Premium: kena token (1–3), no rate limit, cap 10/menit.
+
+```prisma
+model Sticker {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique                  // "paw_clap", "meow_love"
+  name         String
+  image_url    String                            // Lottie JSON URL atau APNG
+  tier         String                            // "free"|"premium"
+  token_cost   Int      @default(0)
+  animation_ms Int      @default(2000)
+  is_active    Boolean  @default(true)
+  created_at   DateTime @default(now())
+
+  chats        ChatMessage[]
+}
+```
+
+### `gifts` (catalog)
+
+| Tier | Cost | Feed rotations | Animasi |
+|---|---|---|---|
+| small | 1 token | 0 | sticker enlarged, 2 dtk |
+| medium | 3 token | 1 | top-corner banner, 4 dtk |
+| large | 10 token | 3 | full-screen takeover, 6 dtk, sound (opt-in) |
+| epic | 50 token | 10 + special meal | takeover + slow-mo + ucap nama donor, 10 dtk |
+
+```prisma
+model Gift {
+  id                  String   @id @default(uuid()) @db.Uuid
+  code                String   @unique
+  name                String
+  image_url           String
+  animation_url       String                     // full-screen Lottie
+  tier                String                     // small|medium|large|epic
+  token_cost          Int                        // >0
+  feed_rotations      Int      @default(0)       // 0 = sticker-only, >0 trigger feed
+  display_duration_ms Int      @default(3000)
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+
+  transactions        GiftTransaction[]
+}
+```
+
+### `gift_transactions`
+
+```prisma
+model GiftTransaction {
+  id             String   @id @default(uuid()) @db.Uuid
+  session_id     String   @db.Uuid
+  gift_id        String   @db.Uuid
+  user_id        String   @db.Uuid
+  device_id      String   @db.Uuid
+  tokens_spent   Int
+  feed_rotations Int                              // snapshot dari gift.feed_rotations
+  feeding_log_id String?  @db.Uuid
+  status         String   @default("pending")     // pending|completed|failed|refunded
+  reason         String?
+  refunded       Boolean  @default(false)
+  refunded_at    DateTime?
+  created_at     DateTime @default(now())
+
+  session     StreamSession @relation(fields: [session_id], references: [id])
+  gift        Gift          @relation(fields: [gift_id], references: [id])
+  user        User          @relation(fields: [user_id], references: [id])
+  device      Device        @relation(fields: [device_id], references: [id])
+  feeding_log FeedingLog?   @relation(fields: [feeding_log_id], references: [id])
+
+  @@index([session_id, created_at(sort: Desc)])
+  @@index([user_id, created_at(sort: Desc)])
+}
+```
+
+### `stream_viewers` (presence)
+
+Hot presence = Redis SET `viewer:session:{id}` (member = `user:{uid}` atau `anon:{eph_id}`). Postgres write hanya saat `join`/`leave` untuk audit (tidak setiap heartbeat).
+
+```prisma
+model StreamViewer {
+  id         String   @id @default(uuid()) @db.Uuid
+  session_id String   @db.Uuid
+  user_id    String?  @db.Uuid                   // null = anonim
+  anon_id    String?                             // ephemeral
+  socket_id  String   @unique
+  joined_at  DateTime @default(now())
+  left_at    DateTime?
+  ip_hash    String                              // sha256(ip + salt)
+
+  session StreamSession @relation(fields: [session_id], references: [id])
+  user    User?         @relation(fields: [user_id], references: [id])
+
+  @@index([session_id, left_at])
+}
+```
+
+### `moderation_logs`
+
+```prisma
+model ModerationLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  target_type String                                       // chat|user|gift
+  target_id   String   @db.Uuid
+  actor_type  String                                       // auto|admin
+  actor_id    String?  @db.Uuid
+  action      String                                       // hide_chat|mute_24h|ban|unban|warn|refund_gift
+  reason      String
+  evidence    Json?                                        // snapshot chat sebelum hide
+  created_at  DateTime @default(now())
+
+  @@index([target_id, created_at(sort: Desc)])
+}
+```
+
 ---
 
 ## REST API
@@ -324,6 +503,37 @@ Semua endpoint prefix `/api/v1`. Format error: lihat contract §10.
 | `POST` | `/admin/devices/:id/stream/start` | |
 | `POST` | `/admin/devices/:id/stream/stop` | |
 | `GET` | `/admin/feeding-logs` | Filter by device, user, status, date |
+
+### Livestream Social — Public
+
+| Method | Path | Keterangan |
+|---|---|---|
+| `GET` | `/streams/active` | List stream aktif (untuk landing/feed sosial) |
+| `GET` | `/streams/:session_id/chat?limit=50&before=ts` | Replay chat (read-only utk anon) |
+| `GET` | `/streams/:session_id/viewers?limit=20` | Viewer list (avatars). Hide user yg `privacy_show_in_viewers=false` |
+| `GET` | `/stickers` | Catalog sticker aktif |
+| `GET` | `/gifts` | Catalog gift aktif |
+
+### Livestream Social — User JWT
+
+| Method | Path | Keterangan |
+|---|---|---|
+| `POST` | `/streams/:session_id/gifts` | Buy + send gift. Atomic: deduct token + record + WS broadcast + (opsional) enqueue feed |
+| `PATCH` | `/me/privacy` | `{ show_in_viewers, handle? }` |
+| `POST` | `/streams/:session_id/chat/:msg_id/report` | Report chat ke moderation queue |
+| `DELETE` | `/streams/:session_id/chat/:msg_id` | Self-delete (≤5 menit) |
+
+### Livestream Social — Admin JWT
+
+| Method | Path | Keterangan |
+|---|---|---|
+| `GET` | `/admin/streams/:session_id` | Detail session + stats |
+| `POST` | `/admin/chat/:msg_id/hide` | Hide chat + log |
+| `POST` | `/admin/users/:id/mute` | `{ hours, reason }` |
+| `POST` | `/admin/users/:id/ban` | `{ reason }` |
+| `POST` | `/admin/users/:id/unban` | |
+| `POST` | `/admin/gifts/:id/refund` | Manual refund kalau ada dispute |
+| `GET` | `/admin/moderation/queue` | List flagged content |
 
 ### Internal (M2M only, IP whitelist + shared secret)
 
@@ -473,6 +683,208 @@ Flow: validate state → publish MQTT `commands/stream` → tunggu `events/strea
 **Concurrency: 1 per device_id.**
 
 Publish `commands/refill` → tunggu `events/refill_done` → reset `devices.total_rotations = 0`, `stock_level = 1.0`, log refill.
+
+### Queue: `chat-archive-queue`
+
+**Concurrency: 1 (single writer per session shard).**
+
+Batch insert chat dari Redis Stream → Postgres `chat_messages`. Trigger: setiap 2 detik atau batch >100. Mencegah write storm DB saat chat ramai. Idempotent — pakai chat `id` (UUID) sebagai key.
+
+### Queue: `moderation-queue`
+
+**Concurrency: 5.**
+
+Trigger:
+- Chat flagged HIGH oleh profanity filter → auto-hide + warn user (langsung tanpa job).
+- Chat flagged MID → masuk queue untuk admin review.
+- User report → masuk queue.
+- 3 user report dalam 1 jam thd msg sama → auto-hide pending review.
+
+Worker action: notif admin via WS `admin:all` + tulis ke `moderation_logs`.
+
+### Integrasi gift dengan `feeding-queue`
+
+Gift dengan `feed_rotations > 0` enqueue job ke `feeding-queue` dengan field tambahan `origin: 'gift', gift_transaction_id`. Worker handle sama dengan feed reguler, tapi:
+- Refund failure → refund **seluruh `tokens_spent`** dari gift (bukan cuma porsi feed), update `gift_transactions.refunded = true`, status `refunded`.
+- WS emit `gift.feed_done { gift_id, feeding_log_id, status, reason? }` ke room `stream:{session_id}` supaya viewer lain juga lihat hasil.
+- System message di chat: "Gift @user otomatis dikembalikan (motor error)" — animasi gift TIDAK di-undo (sudah ditayangkan).
+
+---
+
+## Gift Transaction Flow (Atomic + Compensating)
+
+Gift = transaksi finansial → wajib idempotent + atomic. Tahapan:
+
+```ts
+// POST /streams/:session_id/gifts { gift_code, idempotency_key }
+async function buyGift(input) {
+  // 1. Pre-flight: gift active + stream active
+  const gift = await prisma.gift.findUnique({ where: { code, is_active: true }});
+  if (!gift) throw new Error('GIFT_NOT_AVAILABLE');
+  const session = await prisma.streamSession.findUnique({ where: { id: session_id, ended_at: null }});
+  if (!session) throw new Error('STREAM_NOT_ACTIVE');
+
+  // 2. Idempotency (SETNX 24h)
+  const idem = `gift:idem:${user_id}:${input.idempotency_key}`;
+  const acquired = await redis.set(idem, '1', 'EX', 86400, 'NX');
+  if (!acquired) return await findExistingTx(idem);
+
+  // 3. Cooldown gift per user (5s)
+  const cd = await redis.set(`gift:cd:${user_id}`, '1', 'EX', 5, 'NX');
+  if (!cd) throw new Error('COOLDOWN_ACTIVE');
+
+  // 4. Atomic token deduct
+  const remaining = await redis.decrby(`token:balance:${user_id}`, gift.token_cost);
+  if (remaining < 0) {
+    await redis.incrby(`token:balance:${user_id}`, gift.token_cost);
+    throw new Error('INSUFFICIENT_TOKENS');
+  }
+
+  // 5. Persist + DB token deduct (transaction)
+  let tx;
+  try {
+    tx = await prisma.$transaction(async (db) => {
+      await db.user.update({ where: { id: user_id }, data: { token_balance: { decrement: gift.token_cost }}});
+      return db.giftTransaction.create({
+        data: { session_id, gift_id: gift.id, user_id, device_id: session.device_id,
+                tokens_spent: gift.token_cost, feed_rotations: gift.feed_rotations,
+                status: gift.feed_rotations > 0 ? 'pending' : 'completed' },
+      });
+    });
+  } catch (e) {
+    await redis.incrby(`token:balance:${user_id}`, gift.token_cost);   // rollback Redis
+    throw e;
+  }
+
+  // 6. Broadcast WS animation INSTANT (visual harus segera)
+  io.to(`stream:${session_id}`).emit('gift.sent', { id: tx.id, user, gift, status: tx.status });
+
+  // 7. Kalau gift trigger feed → enqueue feed job
+  if (gift.feed_rotations > 0) {
+    const feedingLog = await prisma.feedingLog.create({
+      data: { device_id: session.device_id, triggered_by_user: user_id, token_usage_id: null,
+              rotations_requested: gift.feed_rotations, status: 'queued' }
+    });
+    await prisma.giftTransaction.update({ where: { id: tx.id }, data: { feeding_log_id: feedingLog.id }});
+    await feedingQueue.add('feed', {
+      device_id: session.device_id, feeding_log_id: feedingLog.id,
+      user_id, rotations: gift.feed_rotations,
+      origin: 'gift', gift_transaction_id: tx.id,
+    });
+  }
+
+  return tx;
+}
+```
+
+**Refund kalau feed gagal:** refund seluruh `tokens_spent` (user beli "bundle pengalaman", bukan komponen). Animasi gift tidak di-undo. Post system message ke chat. Status `gift_transactions.status = 'refunded'`.
+
+---
+
+## Chat Pipeline
+
+```
+Client emit chat.send
+   ↓
+[Backend Socket.io handler]
+   ├─ AuthN cek (login + not muted + not banned)
+   ├─ Rate limit cek (Redis SETNX 3s)
+   ├─ Content validation (zod, length ≤280)
+   ├─ Profanity filter (bloom filter + regex, id+EN slur)
+   │     ├─ HIGH severity → auto-hide + warn user
+   │     └─ MID severity → kirim tapi flag → moderation queue
+   ├─ Persist ke Redis Stream (XADD MAXLEN ~200)
+   ├─ Broadcast ke room (batched 100ms)
+   ├─ Async: enqueue ke chat-archive-queue (batch insert Postgres)
+   └─ Async: enqueue ke moderation-queue kalau flagged
+```
+
+**Profanity list** di `lib/profanity/id.json` — Bahasa Indonesia + slang + EN common slur. Update via `PATCH /admin/moderation/profanity`. Leet-speak normalization (`b0d0h` → `bodoh`).
+
+**Auto-warn / mute:**
+
+| Trigger | Action |
+|---|---|
+| 3 HIGH chat dalam 24h | auto-mute 24h + warn |
+| 5 MID chat dalam 7 hari | warn, no mute |
+| 3 user report dalam 1 jam thd msg sama | auto-hide pending review |
+| Spam (sama content 5x dalam 1 menit) | auto-mute 15 menit |
+
+**Chat replay untuk joiner baru:** server kirim 50 message terakhir dari Redis Stream sebagai initial state, lalu live append. Anonymous = baca replay sama, input area di-mark "🔒 Login untuk chat".
+
+---
+
+## Viewer Presence
+
+**Real-time count:** Redis SET `viewer:session:{id}` cardinality. Broadcast `viewer.joined/left` event throttled 1/detik (cuma kirim count terbaru).
+
+**Unique tracking:** setiap join → cek member SET sebelumnya, kalau belum → `total_unique_viewers++`. Update `peak_viewers` kalau current > peak. Batch update DB tiap 30 detik (bukan per-event).
+
+**Viewer list endpoint** (`GET /streams/:session_id/viewers`): tampil 20 viewer (paginated). Sort login dulu, anonim sebagai bucket. Hide user `privacy_show_in_viewers = false`.
+
+---
+
+## Anonymous Preview Gating
+
+Budget: 60 detik per device per IP per hari. Disimpan Redis `preview:device:{id}:ip:{ipHash}:{todayUTC}`. IP hash = `sha256(ip + PREVIEW_SALT)`.
+
+```ts
+const keyDailyBudget = `preview:${device_id}:ip:${ipHash}:${todayUTC()}`;
+let remaining = await redis.get(keyDailyBudget);
+if (remaining === null) remaining = ANON_PREVIEW_SECONDS_PER_DAY;   // 60
+if (remaining <= 0) { socket.emit('preview.expired', {}); socket.disconnect(); return; }
+await redis.set(keyDailyBudget, remaining, 'EX', secondsUntilTomorrowUTC());
+
+// Push notif 15s / 5s / 0s sebelum expiry
+[remaining-15, remaining-5, 0].filter(t => t > 0).forEach(t => {
+  setTimeout(() => socket.emit('preview.expiring', { remaining_s: remaining - t }), t * 1000);
+});
+setTimeout(() => { socket.emit('preview.expired', {}); socket.disconnect(); }, remaining * 1000);
+```
+
+Saat tab ditutup sebelum habis → sisa budget kembali (decrement actual usage). IP berubah (mobile network) → hash beda → budget reset. Phase 1 acceptable (soft gate); Phase 2 tambah CAPTCHA + device fingerprint.
+
+---
+
+## Moderation Tools
+
+**In-stream (admin overlay):**
+- Long-press chat bubble → menu: `Hide` | `Mute author 24h` | `Ban author`
+- Toggle **Slow mode** → paksa cooldown 10 detik untuk semua user di session
+- **Pause chat** → hentikan semua chat (system message: "Chat di-pause oleh admin")
+- **End stream** dengan konfirmasi 2x
+
+**Dashboard:**
+- `/admin/moderation/queue` — list flagged. Per item: snapshot, context (5 msg sebelum/sesudah), button approve / hide / ban.
+- `/admin/moderation/users` — search user, warn count, mute/ban history.
+- Semua admin action → `moderation_logs` + audit_log (sudah ada).
+
+**SLA Phase 1:** report < 1 jam reviewed (manual). HIGH severity auto-hide < 2 detik. Ban appeal via email `support@purrtein.com`.
+
+---
+
+## Scaling Pertimbangan Sosial Layer
+
+**Target Phase 1:**
+- 50 device live concurrent.
+- 200 viewer concurrent per device popular.
+- 10.000 total concurrent socket.
+- 500 msg/sec chat aggregate.
+
+**Bottleneck assessment:**
+
+| Komponen | Bottleneck | Mitigasi |
+|---|---|---|
+| Socket.io | RAM ~10 KB/connection × 10k = 100 MB | Vertical scale 1–2 pod 2GB + redis-adapter |
+| Redis pub/sub | message fan-out | Dedicated socket-Redis vs cache-Redis (Phase 2: cluster) |
+| Postgres chat insert | high write | Batch write-behind 100/2s via `chat-archive-queue` |
+| WHEP egress (video) | bandwidth mediamtx | Cap viewer / stream Phase 1, CDN Phase 2 |
+| EMQX | tidak terdampak (sosial layer di Node) | — |
+
+**Cap defensif Phase 1:**
+- Max concurrent viewer per device: **300**. Setelah itu → "Stream penuh, antri sebentar" (queue Redis sorted set, polling 5s).
+- Max chat per detik per session: **50** (`SESSION_MAX_CHAT_PER_SEC`). Lewat threshold → slow mode auto 10s untuk semua user di session.
+- Max sticker animation visible at once: 1 large/epic (queue).
 
 ---
 
@@ -751,3 +1163,13 @@ CI block merge kalau coverage `< target` atau test gagal.
 - ❗ **Clock skew di pod**: pod tanpa NTP → anti-replay false positive. Container WAJIB sync host clock (`hostNetwork` atau Kubernetes time-sync sidecar).
 - ❗ **Prisma migrate di multi-pod startup**: race lock. Pakai init container terpisah / `pre-deploy hook`.
 - ❗ **MQTT keepalive < heartbeat**: kalau keepalive < 30s, broker disconnect cepat. Set client keepalive 60s.
+- ❗ **Chat flood DoS**: tanpa rate limit + cap → backend crash. Rate limit di socket level + `SESSION_MAX_CHAT_PER_SEC = 50` cap, slow mode auto kalau lewat.
+- ❗ **WS Redis adapter down** → broadcast tidak sinkron antar pod → viewer lihat chat berbeda. Health check + alert.
+- ❗ **Race gift transaction**: client tap 5x sebelum response → 5x deduct. **Fix:** `idempotency_key` di body wajib + Redis SETNX 24h.
+- ❗ **Gift triggers feed saat device offline (race)**: gift bayar tapi feed gagal sampai. **Fix:** pre-flight `stream_state === active`. Kalau race terjadi → refund **full** `tokens_spent` + system message ke chat.
+- ❗ **Anon preview bypass via VPN/clear cookie** → bandwidth bleed. Phase 1 acceptable (soft gate), Phase 2 CAPTCHA + device fingerprint.
+- ❗ **Mute bypass via re-register**: user banned bikin akun baru. Email + phone verify minimal.
+- ❗ **Chat history loss saat Redis restart** → 24h ephemeral hilang. Acceptable, archive Postgres tetap aman via `chat-archive-queue`.
+- ❗ **Profanity false positive** → user normal kena auto-hide. Whitelist mechanism + manual review queue (sla 1 jam).
+- ❗ **Toxic chat publik viral di sosmed** → reputasi rusak. Profanity filter day-1 + ban tools tested + admin response SLA.
+- ❗ **GDPR/UU PDP request hapus chat**: hard delete user → chat lain context-nya rusak. **Fix:** anonymize `user_id` jadi "deleted_user", konten tetap (anonim) untuk preserve thread.

@@ -298,21 +298,60 @@ Tanpa ini, attacker bisa share WHEP URL & habisin bandwidth.
 
 ---
 
-## 9. WebSocket Events (Server → Client)
+## 9. WebSocket Events
 
-Socket.io rooms: `user:{user_id}` (private), `device:{device_id}` (admin only), `admin:all` (broadcast).
+Socket.io rooms:
+- `user:{user_id}` — private channel per user
+- `device:{device_id}` — admin-only device room
+- `admin:all` — broadcast ke semua admin
+- `stream:{session_id}` — room sosial per sesi stream (chat, sticker, gift, viewer)
+
+### 9.1 Server → Client
+
+**Core events**
 
 | Event | Payload | Room |
 |---|---|---|
 | `device.status` | `{ device_id, status, stock_level, total_rotations, updated_at }` | `device:{id}` + `admin:all` |
 | `device.alert` | `{ device_id, type: "stock_low"\|"stock_empty"\|"offline"\|"motor_stall", message }` | `admin:all` |
-| `device.stream` | `{ device_id, state, whep_url? }` | `device:{id}` + `admin:all` |
-| `feeding.queued` | `{ feeding_log_id, device_id }` | `user:{user_id}` |
-| `feeding.done` | `{ feeding_log_id, device_id, status, rotations }` | `user:{user_id}` + `device:{id}` |
-| `feeding.failed` | `{ feeding_log_id, device_id, reason, token_refunded }` | `user:{user_id}` |
+| `device.stream` | `{ device_id, state, session_id?, whep_url? }` | `device:{id}` + `admin:all` |
+| `feeding.queued` | `{ feeding_log_id, device_id, origin: "user"\|"gift" }` | `user:{user_id}` |
+| `feeding.done` | `{ feeding_log_id, device_id, status, rotations, origin }` | `user:{user_id}` + `device:{id}` |
+| `feeding.failed` | `{ feeding_log_id, device_id, reason, token_refunded, origin }` | `user:{user_id}` |
 | `token.credited` | `{ balance, topup_id }` | `user:{user_id}` |
 | `token.debited` | `{ balance, reason }` | `user:{user_id}` |
 | `topup.failed` | `{ external_id, reason }` | `user:{user_id}` |
+
+**Sosial layer events** (chat, sticker, gift, viewer, anonymous preview, moderation)
+
+| Event | Payload | Room |
+|---|---|---|
+| `stream.session` | `{ session_id, started_at, viewer_count, you: { tier, preview_remaining_s? }}` | reply ke joiner |
+| `viewer.joined` | `{ session_id, count, user?: {id, handle, avatar} }` | `stream:{id}` (throttled 1/s) |
+| `viewer.left` | `{ session_id, count }` | `stream:{id}` (throttled 1/s) |
+| `viewer.list` | `{ session_id, viewers: [...], total, anon_count }` | reply ke requester |
+| `chat.message` | `{ id, user: {id, handle, avatar, badge?}, content, type, sticker?, created_at }` | `stream:{id}` (batched 100 ms) |
+| `chat.deleted` | `{ message_id, deleted_by_role }` | `stream:{id}` |
+| `sticker.sent` | `{ id, user, sticker: {code, image_url, animation_ms}, tier }` | `stream:{id}` |
+| `gift.sent` | `{ id, user, gift: {code, name, image_url, animation_url, tier, feed_rotations}, status }` | `stream:{id}` |
+| `gift.feed_done` | `{ gift_id, feeding_log_id, status, reason? }` | `stream:{id}` |
+| `preview.expiring` | `{ remaining_s }` | private (anon socket, notif 15 s / 5 s / 0 s) |
+| `preview.expired` | `{}` | private — client kick stream + tampil login overlay |
+| `system.notice` | `{ severity, message }` | `stream:{id}` |
+| `moderation.muted` | `{ until, reason }` | private |
+| `moderation.banned` | `{ reason }` | private |
+
+### 9.2 Client → Server (sosial)
+
+| Event | Payload | Auth | Rate limit |
+|---|---|---|---|
+| `stream.join` | `{ device_id }` | publik | 5/menit/IP |
+| `stream.leave` | `{ session_id }` | sama | — |
+| `chat.send` | `{ session_id, content (≤280) }` | login | 1 / 3 detik per user |
+| `sticker.send` | `{ session_id, sticker_code }` | login | 1 / 2 detik (free), 10/menit (premium) |
+| `gift.send` | `{ session_id, gift_code, idempotency_key }` | login | 1 / 5 detik per user |
+| `chat.delete` | `{ message_id }` | author (≤5 menit) atau admin | — |
+| `viewer.privacy` | `{ show_in_list: bool }` | login | — |
 
 Frontend WAJIB handle reconnect WS + idempotent UI update (event bisa double).
 
@@ -352,11 +391,25 @@ COMMAND_REPLAY_WINDOW_S=30
 FEEDING_ACK_TIMEOUT_S=45
 USER_FEED_COOLDOWN_S=300
 DEVICE_FEED_COOLDOWN_S=30
-STREAM_MAX_DURATION_S=300
+STREAM_MAX_DURATION_S=1800        # extended dari 300 — sosial stream perlu lebih panjang
 STREAM_TOKEN_TTL_S=60
 WS_AUTH_TIMEOUT_S=10
 NTP_RESYNC_INTERVAL_S=3600
 WATCHDOG_TIMEOUT_S=30
+
+# Livestream social layer (lihat CLAUDE_livestream_social.md)
+ANON_PREVIEW_SECONDS_PER_DAY=60
+CHAT_RATE_LIMIT_S=3
+CHAT_MAX_LEN=280
+CHAT_REPLAY_COUNT=50
+CHAT_BROADCAST_BATCH_MS=100
+STICKER_FREE_RATE_LIMIT_MS=2000
+STICKER_PREMIUM_PER_MINUTE=10
+GIFT_COOLDOWN_S=5
+VIEWER_LIST_PAGE_SIZE=20
+PRESENCE_BROADCAST_THROTTLE_MS=1000
+SESSION_MAX_CHAT_PER_SEC=50
+MAX_CONCURRENT_VIEWERS_PER_DEVICE=300
 ```
 
 Frontend cache `/config/public` di React Query dengan `staleTime: 5min`. Firmware Phase 1: compile-time constants di `config.h` — wajib MATCH dengan env backend (CI check direkomendasikan).

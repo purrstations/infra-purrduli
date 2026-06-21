@@ -236,6 +236,21 @@ Container padding mobile: `16px`. Desktop card: `24px`.
 | `<DeviceTableRow device>` | Admin row: nama + lokasi + status + stok + last_seen + action button |
 | `<NotificationItem alert>` | Severity dot + judul + body + waktu + CTA "Lihat device" |
 | `<PairingWizard>` | 4 step: form → QR display → polling → success/timeout |
+| `<LiveBadge>` | Dot pulsing merah + label "LIVE". Pakai di header stream + di marker peta saat stream aktif |
+| `<ViewerCount count>` | Icon eye + tabular-nums. Animasi count-up saat berubah |
+| `<ViewerAvatarStack viewers max={5}>` | Stack avatar dengan "+N more". Klik → modal full list |
+| `<ChatOverlay session>` | Virtualized list, auto-scroll, fade old. Max 5 visible di mobile overlay. Long-press bubble → menu (delete/report/mute admin) |
+| `<ChatBubble msg>` | Avatar + handle + content + badge optional. Tipe `system` = italic warna info. Tipe `sticker` = inline thumbnail |
+| `<ChatInput onSend>` | Input + sticker picker trigger + gift drawer trigger + send. Disabled state untuk anon ("🔒 Login untuk chat"). Countdown ring saat cooldown |
+| `<StickerPicker>` | Tab Free \| Premium (token cost label). Recent picks di top |
+| `<StickerAnimation>` | Float-up Lottie/APNG, ephemeral (auto-remove after `animation_ms`). Pool max 3 simultan |
+| `<GiftDrawer>` | Bottom sheet: catalog gift dengan tier badge, animation preview, token cost, "Kirim" button dengan cooldown |
+| `<GiftAnimation>` | Overlay per tier: small (sudut), medium (banner), large (full + slow-mo), epic (full + slow-mo + ucap nama donor) |
+| `<PreviewCountdown remaining_s>` | Sticky banner anon. Bar tipis + countdown + CTA "Login dulu" |
+| `<PreviewExpiredModal>` | Block overlay full-screen. CTA login / cari feeder lain |
+| `<SystemNotice>` | System message di chat (italic, warna info, prefix "ℹ ") |
+| `<ModerationMenu>` | Long-press chat bubble → menu admin/owner (hide / mute 24h / ban / report) |
+| `<SlowModeBanner>` | Banner kuning di chat saat slow mode aktif, dengan countdown global |
 
 ### 8.4 Page templates
 
@@ -392,23 +407,111 @@ Marker tap → bottom sheet preview `<FeederCard>` (50% viewport) → "Lihat det
 
 **Real-time:** WS `device.status` → marker color update tanpa reload.
 
-### 12.2 `/feeder/:id` — Detail Feeder
+### 12.2 `/feeder/:id` — Livestream Sosial (TikTok-style)
 
-**Sections (mobile, stacked):**
-1. Header (nama + lokasi + back button)
-2. `<StreamPlayer>` 16:9 — kalau belum login, overlay "Login untuk lihat live" + CTA
-3. Status badge row: `<StatusBadge>` + `<StockIndicator>` + "X kucing diberi makan hari ini"
-4. CTA besar `<Button variant="primary" size="lg">🥣 Beri Makan</Button>` — disabled kalau offline, tambah helper text
-5. Footer: lokasi map mini + alamat lengkap + "Lapor masalah"
+Halaman ini = **hub sosial real-time**, bukan static detail. User datang untuk nonton, chat, kirim sticker/gift, dan beri makan. Layout berbeda antara mobile (vertical full-screen) dan desktop (2-kolom).
 
-**Data:** `useQuery(['device', id])`, `useQuery(['device', id, 'stream'])`.
+**Data:** `useQuery(['device', id])`, `useQuery(['device', id, 'stream'])`, `useStreamSocial(id)` (lihat `CLAUDE_frontend.md`).
 
-**States:**
-- Device offline: stream placeholder "Feeder offline" + CTA disabled + "Coba feeder lain" link ke `/`.
-- Stream tidak aktif: placeholder "Stream sedang tidak aktif" + opsi (kalau admin) Start; user biasa = info aja.
-- Stock empty: badge merah + tombol disabled + "Stok habis. Coba feeder lain."
+#### Layout mobile (portrait, < 768px)
 
-**Real-time:** `device.status`, `device.stream`, `feeding.done` (counter "X kucing").
+```
+┌──────────────────────┐
+│ ╱╲ KEMBALI    ⚙       │  56px top, transparan over video
+│                      │
+│                      │
+│   [VIDEO 9:16 fit]   │  ← full bleed, object-cover
+│                      │
+│ 👁 142 · LIVE ●      │  ← overlay top-left
+│ 🐾 Sudirman 01       │
+│ [▓▓▓▓░░] 72% stok    │  ← stock indicator compact
+│                      │
+│ ┌──────────────────┐ │
+│ │ 🐾 Pinky (admin) │ │  ← chat overlay bottom
+│ │   "lapar ini si  │ │     auto-scroll, fade old (max 5 visible)
+│ │    kucing"       │ │
+│ │ ⭐ Rina           │ │
+│ │   "@purrtein     │ │
+│ │    feeder satu!" │ │
+│ └──────────────────┘ │
+│                      │
+│  Ketik chat...  🎁 🥣│  ← input bar bawah
+└──────────────────────┘
+```
+
+- Chat overlay: max 5 msg visible, fade gradient ke atas. Drag ke atas → expand ke history panel.
+- Sticker animation: float dari bawah ke atas (60% screen height), durasi `animation_ms` per sticker.
+- Gift animation: takeover sesuai tier (small = sudut, medium = banner, large = full-screen, epic = full + slow-mo + nama donor).
+- Tombol 🥣 = quick feed (open `<FeedConfirmSheet>` bottom sheet).
+- Tombol 🎁 = open `<GiftDrawer>` bottom sheet (catalog gift + sticker premium).
+
+#### Layout desktop (≥ 1024px)
+
+2-kolom:
+
+```
+┌──────────────┬──────────────┐
+│              │  Chat panel  │
+│              │ ┌──────────┐ │
+│  [VIDEO 16:9]│ │ Pinky    │ │
+│              │ │ Rina     │ │
+│              │ │ ...      │ │
+│   👁 142     │ └──────────┘ │
+│   LIVE ●     │  Ketik...    │
+│              │  🎁 stickers │
+│              │ ────────────│
+│              │  👥 Viewers  │
+│              │  [avatars]   │
+│              │              │
+└──────────────┴──────────────┘
+```
+
+#### State per tier akses
+
+| Tier user | Stream | Chat | Sticker | Gift | Viewer list | CTA Feed |
+|---|---|---|---|---|---|---|
+| **Anonim** | ✅ preview 60 s/hari | ❌ read-only ("🔒 Login untuk chat") | ❌ | ❌ | count saja | ❌ "Login dulu" |
+| **Login** | ✅ unlimited | ✅ 1/3 s | ✅ free + premium | ✅ | ✅ avatar+nama (opt-in) | ✅ |
+| **Muted/banned** | ✅ | ❌ pesan "Kamu di-mute sampai …" | ❌ | ✅ (muted only) | ✅ | ✅ |
+| **Admin** | ✅ | ✅ + badge [Admin] | ✅ | ✅ | ✅ + data lengkap | ✅ + tombol Stop Stream / Refill |
+
+#### Anonymous preview gating
+
+- Saat join → backend kirim `stream.session` dengan `you.preview_remaining_s` (mis. 60).
+- Sticky banner kuning tipis di atas video: "Mode preview · 0:42" countdown.
+- WS `preview.expiring` saat 15 s / 5 s tersisa → toast "Sebentar lagi habis, login dulu yuk".
+- WS `preview.expired` → `<PreviewExpiredModal>` block stream + CTA `[ Login ]` `[ Cari feeder lain ]`.
+
+#### State kondisi device
+
+- Device offline: video placeholder "Feeder offline" + CTA disabled + "Coba feeder lain". Chat tetap tampil tapi read-only.
+- Stream tidak aktif (`stream_status !== 'active'`): video placeholder "Stream akan mulai sebentar lagi" + animasi kamera pulsing. Untuk admin: tombol [Start Stream].
+- Stock empty: badge merah + tombol feed disabled + helper "Stok habis. Coba feeder lain."
+
+#### Real-time events di-handle
+
+`device.status`, `device.stream`, `feeding.done`/`failed`, `stream.session`, `viewer.joined/left`, `chat.message`, `chat.deleted`, `sticker.sent`, `gift.sent`, `gift.feed_done`, `preview.*`, `system.notice`, `moderation.muted/banned`.
+
+#### Voice & tone tambahan
+
+| Konteks | Copy |
+|---|---|
+| Join welcome | "Kamu join. 142 lainnya nonton juga." |
+| Anon preview start | "Mode preview 60 detik — login untuk nonton terus" |
+| Anon preview habis | "Yuk login biar bisa ikut nge-chat & kirim gift" |
+| Gift sukses (small) | "🎉 @Rina kirim 🐾 Paw Clap!" |
+| Gift sukses (medium+feed) | "✨ @Rina kirim Bowl Premium — 1× feed jalan!" |
+| Gift refund | "Gift @Rina dikembalikan (motor error)" |
+| Self muted | "Kamu di-mute admin selama 24 jam. Detail di Profil." |
+| Slow mode on | "Mode pelan aktif — tunggu 10 detik antar chat." |
+| Stream end | "Stream berakhir. Sampai jumpa di feeder lain!" |
+
+#### Anti-abuse defense
+
+- Chat input: rate limit 1/3 s di client (disable + countdown indicator), backend reinforce.
+- Gift drawer: tombol "Send" disabled 5 s setelah klik (cooldown indicator).
+- Idempotency key gift di body request — tap berkali-kali = 1 transaksi.
+- Max 1 large/epic gift animation visible at once (queue, tampilkan "Antrian gift: N" kalau penuh).
 
 ### 12.3 `/feeder/:id/feed` — Konfirmasi Feeding
 
@@ -765,3 +868,14 @@ Sinkron dengan `CLAUDE_integration_contract.md §15`.
 - ❗ **Long device name overflow** → layout pecah. Truncate dengan `text-ellipsis`, tooltip on hover/long-press untuk teks penuh.
 - ❗ **Refund toast hilang sebelum user baca** → user kira saldo nyangkut. Refund toast = 8 detik (bukan 4 default).
 - ❗ **Copy "gagal" tanpa konteks** → user marah. Selalu sertakan alasan + apa yang sudah dilakukan (token kembali) + apa yang user bisa lakukan.
+- ❗ **Gift animation banjir blur stream** → user tidak lihat kucing. Cap max 1 large/epic visible at once (queue), small/medium boleh paralel max 3.
+- ❗ **Chat overlay nutupin video** → user tidak lihat kucing makan. Mobile: max 5 msg + fade gradient + tap kosong = hide overlay sementara.
+- ❗ **Refund gift UI mismatch** → user kira gift batal tapi animasi tetap tayang. System message di chat **wajib jelas**: "dikembalikan" + saldo update + warna info (bukan error keras).
+- ❗ **Anon preview countdown invisible** → user kaget tiba-tiba ke-kick. Sticky banner countdown + toast notif 15s/5s sebelum habis.
+- ❗ **Sticker/gift CDN down** → broken image di chat. Fallback emoji + retry image load 3x dengan exponential backoff.
+- ❗ **iOS WebRTC + chat overlay z-index** → video di atas chat. Chat di div terpisah di atas video, BUKAN child video element. Test di Safari iOS sebelum launch.
+- ❗ **Slow mode di tengah event seru** → user kecewa. Cooldown indicator di tombol chat send + banner "Mode pelan aktif, tunggu Xs" yang jelas.
+- ❗ **Chat scroll auto-jump saat user baca history** → frustasi. Auto-scroll PAUSE saat user scroll up; tampilkan tombol "Pesan baru ↓ N" untuk resume.
+- ❗ **Long-press menu admin tidak ke-discover** → admin bingung tools mana. Onboarding tooltip pertama kali login + ikon kecil "moderate" di chat bubble.
+- ❗ **Profile handle kasar/SARA** → image rusak. Filter handle saat set + admin review queue.
+- ❗ **Privacy viewer list default tampil tanpa user tahu** → user marah. Onboarding **WAJIB** tampilkan toggle saat register + reminder saat join stream pertama.

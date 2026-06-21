@@ -295,15 +295,31 @@ const socket = io(import.meta.env.VITE_WS_URL, {
 });
 
 type Events = {
+  // core
   'device.status': { device_id: string; status: string; stock_level: number; total_rotations: number; updated_at: string };
   'device.alert':  { device_id: string; type: string; message: string };
-  'device.stream': { device_id: string; state: string; whep_url?: string };
-  'feeding.queued': { feeding_log_id: string; device_id: string };
-  'feeding.done':  { feeding_log_id: string; device_id: string; status: string; rotations: number };
-  'feeding.failed': { feeding_log_id: string; device_id: string; reason: string; token_refunded: boolean };
+  'device.stream': { device_id: string; state: string; session_id?: string; whep_url?: string };
+  'feeding.queued': { feeding_log_id: string; device_id: string; origin: 'user'|'gift' };
+  'feeding.done':  { feeding_log_id: string; device_id: string; status: string; rotations: number; origin: 'user'|'gift' };
+  'feeding.failed': { feeding_log_id: string; device_id: string; reason: string; token_refunded: boolean; origin: 'user'|'gift' };
   'token.credited': { balance: number; topup_id: string };
   'token.debited':  { balance: number; reason: string };
   'topup.failed':   { external_id: string; reason: string };
+
+  // sosial layer (room stream:{session_id})
+  'stream.session': { session_id: string; started_at: string; viewer_count: number; you: { tier: string; preview_remaining_s?: number }};
+  'viewer.joined': { session_id: string; count: number; user?: { id: string; handle: string; avatar?: string }};
+  'viewer.left':   { session_id: string; count: number };
+  'chat.message':  { id: string; user: { id: string; handle: string; avatar?: string; badge?: string }; content: string; type: 'text'|'sticker'|'system'; sticker?: any; created_at: string };
+  'chat.deleted':  { message_id: string; deleted_by_role: string };
+  'sticker.sent':  { id: string; user: any; sticker: { code: string; image_url: string; animation_ms: number }; tier: string };
+  'gift.sent':     { id: string; user: any; gift: { code: string; name: string; image_url: string; animation_url: string; tier: string; feed_rotations: number }; status: string };
+  'gift.feed_done':{ gift_id: string; feeding_log_id: string; status: string; reason?: string };
+  'preview.expiring': { remaining_s: number };
+  'preview.expired': {};
+  'system.notice': { severity: string; message: string };
+  'moderation.muted': { until: string; reason: string };
+  'moderation.banned': { reason: string };
 };
 ```
 
@@ -348,6 +364,59 @@ export function WSProvider({ children }: PropsWithChildren) {
 
 **Idempotency event:** event bisa double. Untuk update yang derived dari status final (`feeding.done`), cek `feeding_log_id` di local cache — jika sudah final, skip.
 
+### WS untuk sosial layer (per stream session)
+
+Saat user buka `/feeder/:id` dan stream aktif → `socket.emit('stream.join', { device_id })` → server reply `stream.session` dengan `session_id` + status user (anon preview remaining_s, atau login full). Setelah itu pasang handler chat/sticker/gift/viewer/preview ke `queryClient` (chat history) + local state (animasi ephemeral).
+
+```tsx
+// useStreamSocial.ts
+export function useStreamSocial(deviceId: string) {
+  const qc = useQueryClient();
+  const [session, setSession] = useState<SessionMeta|null>(null);
+  const [previewRemaining, setPreviewRemaining] = useState<number|null>(null);
+  const [animations, setAnimations] = useState<Animation[]>([]);
+
+  useEffect(() => {
+    socket.emit('stream.join', { device_id: deviceId });
+
+    socket.on('stream.session', (m) => { setSession(m); setPreviewRemaining(m.you.preview_remaining_s ?? null); });
+    socket.on('chat.message', (m) => qc.setQueryData(['chat', m.session_id], (old: any[] = []) => [...old.slice(-49), m]));
+    socket.on('chat.deleted', ({ message_id }) => qc.setQueryData(['chat'], (old: any[] = []) => old.filter(c => c.id !== message_id)));
+    socket.on('sticker.sent', (s) => setAnimations(a => [...a, { type: 'sticker', ...s, expires_at: Date.now() + s.sticker.animation_ms }]));
+    socket.on('gift.sent', (g) => setAnimations(a => [...a, { type: 'gift', ...g, expires_at: Date.now() + g.gift.display_duration_ms }]));
+    socket.on('viewer.joined', ({ count }) => qc.setQueryData(['viewer-count', session?.session_id], count));
+    socket.on('viewer.left',   ({ count }) => qc.setQueryData(['viewer-count', session?.session_id], count));
+    socket.on('preview.expiring', ({ remaining_s }) => setPreviewRemaining(remaining_s));
+    socket.on('preview.expired', () => { setPreviewRemaining(0); /* router push login */ });
+    socket.on('system.notice', (n) => toast(n.message, { type: n.severity }));
+    socket.on('moderation.muted', (m) => toast.error(`Kamu di-mute sampai ${m.until}: ${m.reason}`));
+
+    return () => {
+      socket.emit('stream.leave', { session_id: session?.session_id });
+      socket.off('stream.session'); socket.off('chat.message'); /* ...semua off */
+    };
+  }, [deviceId, qc]);
+
+  // GC animasi yang sudah expired
+  useEffect(() => {
+    const t = setInterval(() => setAnimations(a => a.filter(x => x.expires_at > Date.now())), 500);
+    return () => clearInterval(t);
+  }, []);
+
+  return { session, previewRemaining, animations };
+}
+```
+
+**Mutations sosial:**
+
+```ts
+useChatSend()    // POST via socket.emit('chat.send', ...) atau REST fallback
+useStickerSend() // emit('sticker.send', ...)
+useGiftSend()    // POST /streams/:id/gifts { gift_code, idempotency_key: uuid() }
+```
+
+Idempotency gift WAJIB pakai client-generated UUID. Tap berulang → satu transaksi.
+
 ---
 
 ## Halaman & Komponen Inti
@@ -360,15 +429,23 @@ export function WSProvider({ children }: PropsWithChildren) {
 - Click marker → bottom sheet preview → CTA "Detail".
 - Cluster marker (>50 device) via `react-leaflet-cluster`.
 
-### 2. Detail Feeder
+### 2. Detail Feeder (livestream + sosial)
 
-Data: `useDevice(id)` + `useStream(id)`.
+Data: `useDevice(id)` + `useStream(id)` + `useStreamSocial(id)`.
 
-- Header: nama, lokasi, status badge.
-- `<StockIndicator level={0.72}>`.
-- `<StreamPlayer deviceId={id}>` (lihat di bawah).
-- CTA "Beri Makan" — disabled saat `device.status !== 'online'` atau saldo 0.
-- Footer: jumlah feeding hari ini (aggregate dari backend).
+Halaman ini adalah **hub sosial**, bukan static detail. Layout vertical TikTok-style untuk mobile (lihat spec lengkap di `CLAUDE_uiux.md §12.2`). Frontend tanggung jawab:
+
+- `<StreamPlayer deviceId>` — WHEP video (lihat section di bawah).
+- `<ChatOverlay session>` — list chat real-time, virtualized.
+- `<ChatInput>` — input + sticker picker + gift drawer trigger. Disabled untuk anon (tampil "🔒 Login untuk chat").
+- `<StickerAnimation>` — overlay float ephemeral, dari `animations` state.
+- `<GiftAnimation>` — overlay takeover sesuai tier.
+- `<ViewerCount>` + `<ViewerAvatarStack>` di header overlay.
+- `<PreviewCountdown remaining_s>` — sticky banner saat user anon, countdown 60 → 0 → trigger login modal.
+- `<PreviewExpiredModal>` — full block setelah expired, CTA login.
+- CTA "Beri Makan" tetap ada (icon 🥣 di input bar mobile, button kanan desktop) — disabled saat offline/saldo 0/cooldown.
+
+Component-component di atas semua di `packages/ui` + Storybook + axe-tested.
 
 ### 3. Konfirmasi Feeding (`/feeder/:id/feed`)
 

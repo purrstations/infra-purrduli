@@ -147,6 +147,27 @@ QA wajib soak test 24 jam dengan skenario feed-saat-stream untuk validasi. Kalau
 
 ---
 
+## 3.5 Risiko Layer Livestream Social
+
+Dari fitur chat, sticker, gift, dan anonymous preview (detail di `CLAUDE_backend.md` + `CLAUDE_uiux.md`), risiko top-10 di §3 bertambah:
+
+| # | Risiko baru | Likelihood | Impact | Mitigasi |
+|---|---|---|---|---|
+| 11 | Toxic chat publik viral di sosmed | High | Critical (reputasi) | Profanity filter day-1 + SLA review 1 jam + ban tools |
+| 12 | Gift abuse via stolen account | Medium | High (financial user) | Rate limit + cooldown + anomali detection (5 large gift/menit = freeze) |
+| 13 | Bandwidth bleed via anon viewer bypass | High | Medium | Soft gate 60s/IP/hari Phase 1, CAPTCHA + fingerprint Phase 2 |
+| 14 | Race gift transaction → multi-deduct | Medium | High | Idempotency key client wajib + Redis SETNX 24h |
+| 15 | Privacy leak viewer list | Medium | Medium-High | Opt-in toggle, default tampil — onboarding wajib show |
+| 16 | Mute bypass via re-register | Medium | Medium | Email + phone verify Phase 1 |
+| 17 | Gift triggers feed saat device offline (race) | Low | High | Pre-flight cek `stream_state === active`, refund full kalau race |
+| 18 | UI gift animation banjir blur stream | High | Medium | Queue 1 large/epic visible at once |
+| 19 | Chat history hilang saat Redis restart | Low | Low | Acceptable — archive Postgres tetap aman |
+| 20 | GDPR/UU PDP request hapus chat history | Medium | Medium | Anonymize `user_id` ke "deleted_user", tidak hard delete |
+
+Top action sebelum launch: profanity list curated + admin moderation tools tested + load test 200 viewer/sesi + privacy default reviewed dengan legal.
+
+---
+
 ## 4. Backlog Phase 2+ (Yang Sengaja Dibuang dari MVP)
 
 - OTA firmware update (H7).
