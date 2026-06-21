@@ -1,0 +1,50 @@
+name: Deploy Infra
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Deploy ke VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /app/purrtein-infra
+            git pull origin main
+
+            CHANGED=$(git diff --name-only HEAD~1 HEAD)
+
+            # restart nginx kalau config berubah
+            if echo "$CHANGED" | grep -q "^nginx/"; then
+              echo "reload nginx..."
+              docker compose exec nginx nginx -s reload
+            fi
+
+            # restart mediamtx kalau config berubah
+            if echo "$CHANGED" | grep -q "^mediamtx/"; then
+              echo "restart mediamtx..."
+              docker compose restart mediamtx
+            fi
+
+            # restart emqx kalau config berubah
+            if echo "$CHANGED" | grep -q "^emqx/"; then
+              echo "restart mqtt..."
+              docker compose restart mqtt
+            fi
+
+            # full redeploy kalau docker-compose.yml berubah
+            if echo "$CHANGED" | grep -q "^docker-compose"; then
+              echo "full redeploy..."
+              docker compose up -d
+            fi

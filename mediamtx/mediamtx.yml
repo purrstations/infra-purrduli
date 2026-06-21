@@ -1,0 +1,44 @@
+# MediaMTX config untuk Purrtein
+# Docs: https://github.com/bluenviron/mediamtx
+
+logLevel: info
+
+# API untuk management (internal only)
+api: yes
+apiAddress: :9997
+
+# RTSP (ESP32-CAM push stream ke sini)
+rtsp: yes
+rtspAddress: :8554
+rtspAuthMethods: [basic]
+
+# HLS (playback via browser)
+hls: yes
+hlsAddress: :8888
+
+# WebRTC (low latency playback)
+webrtc: yes
+webrtcAddress: :8889
+webrtcICEUDPMuxAddress: :8890
+
+# Auth — semua publish/read butuh credentials
+authMethod: internal
+authInternalUsers:
+  - user: purrtein
+    pass: ${MEDIAMTX_PASS}
+    permissions:
+      - action: publish
+        path: ""
+      - action: read
+        path: ""
+
+# Path config per device — wildcard untuk semua feeder
+pathDefaults:
+  readUser: purrtein
+  readPass: ${MEDIAMTX_PASS}
+  publishUser: purrtein
+  publishPass: ${MEDIAMTX_PASS}
+
+paths:
+  "~^feeder-[0-9]+$":
+    source: publisher
