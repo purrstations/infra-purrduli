@@ -18,6 +18,7 @@ services:
     ports:
       - "1883:1883"   # MQTT (internal, bisa di-close kalau sudah TLS only)
       - "8883:8883"   # MQTT over TLS
+      - "18083:18083" # EMQX dashboard
     volumes:
       - emqx_data:/opt/emqx/data
     networks:
