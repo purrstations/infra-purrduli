@@ -61,61 +61,7 @@ Pakai **KiCad** (open source, native multiplatform) atau **EasyEDA** (browser-ba
 
 **Output schematic Week 1**: PDF + netlist, di-review oleh 1 reviewer eksternal (electronics eng lain) sebelum lanjut PCB / breadboard.
 
-### B. Bill of Materials (BOM)
-
-Tabel acuan (harga & supplier Indonesia, isi sendiri saat sourcing):
-
-| Komponen | Spec | Qty/unit | Supplier kandidat | Lead time | Estimasi harga |
-|---|---|---:|---|---|---|
-| ESP32-S3 N16R8 dev board (with OV2640) | "ESP32-S3-CAM" atau "ESP32-S3-WROOM-1 N16R8 + OV2640 module" | 1 | DigiWare, Tokopedia, AliExpress | 1–3 minggu | Rp 150–250 rb |
-| Stepper motor | NEMA 17, 1.8°, holding torque ≥ 0.4 Nm | 1 | Phaeton, Tokopedia | 3–7 hari | Rp 100–150 rb |
-| Stepper driver | TMC2208 (sunyi) atau A4988 (murah) | 1 | DigiWare | 3–7 hari | Rp 25–80 rb |
-| Power adapter | 12 V / 3 A DC, plug barrel 5.5×2.1 | 1 | Tokopedia | 3 hari | Rp 50 rb |
-| Buck converter | LM2596 module 12V→5V/2A | 1 | DigiWare | 3 hari | Rp 15 rb |
-| Decoupling caps | 470 µF/25V elco + 10 µF tantalum + 100 nF ceramic | 5 set | DigiWare | 3 hari | Rp 10 rb |
-| MiFi pocket router | Telkomsel Orbit / XL Home / Smartfren MiFi | 1 | retailer ops | 1 hari | Rp 500 rb–1 jt |
-| Kartu SIM data | unlimited 50 GB/bln min | 1 | operator | 1 hari | Rp 100 rb/bln |
-| Vibration damper | Rubber grommet M4/M5 (4 pcs) | 1 set | toko hardware | 1 hari | Rp 10 rb |
-| Enclosure | 3D print PETG/ABS atau cetak vendor | 1 | Tokopedia 3D print | 5–10 hari | Rp 100–300 rb |
-| Konektor + kabel | JST-XH 4P, AWG 22 twisted pair, ferrite bead | 1 set | DigiWare | 3 hari | Rp 30 rb |
-| Camera lens cover IP | Kaca tahan air clear acrylic 30 mm | 1 | toko outdoor | 3 hari | Rp 15 rb |
-
-**Target total BOM** per unit: **Rp 1.2–1.8 jt** (Phase 1 prototype). Iterasi cost-down saat scaling (TMC2208 → A4988, dev board → bare module).
-
-**Order Week 1**, hardware tiba Week 2.
-
-### C. Mechanical Design
-
-Software tidak peduli geometri fisik, tapi **kalibrasi `STOCK_CAPACITY_ROTATIONS` 100% bergantung dimensi tabung + dispenser**. Hardware/mech designer harus jadwalkan paralel.
-
-**Sub-blok:**
-
-1. **Dispenser type** — pilih satu:
-   - **Auger screw** — paling akurat per rotasi, tapi pakan kering kecil only. Cocok untuk kibble standar.
-   - **Drum dengan slot** — sederhana, rotasi penuh = 1 porsi. Akurasi ±20%.
-   - **Paddle** — kontrol berdasarkan derajat. Rentan stuck.
-   - **Rekomendasi Phase 1**: drum slot — paling forgiving untuk berbagai ukuran pakan.
-
-2. **Tabung pakan** — silinder transparan (PETG) supaya teknisi bisa lihat level visual:
-   - Kapasitas target: **2 kg** pakan kering (sekitar 200 mangkok @10 g)
-   - Tutup atas dengan engsel + magnetic latch (refill cepat tanpa tool)
-   - Drainase bawah ke dispenser
-
-3. **Camera mount** — bracket terpisah dari motor mount, di-isolasi dengan rubber grommet 4 titik. FOV ke arah bowl (sudut 30–45° dari atas), jarak optimal 40–60 cm.
-
-4. **Motor mount** — pelat aluminium tebal 2 mm, ground ke chassis. Vibration damper antara motor dan chassis.
-
-5. **Enclosure outdoor** — IP65 minimum:
-   - Cable gland untuk power input
-   - Vent screen anti-air (hidrofobik mesh)
-   - Camera lens cover dengan defog coating (opsional)
-   - Mounting hole untuk wall/pole
-
-6. **Akses servis** — teknisi harus bisa buka tutup tabung tanpa unscrew enclosure utama.
-
-**Output Week 1**: sketsa CAD 2D + dimensi (Fusion 360 / OnShape / FreeCAD). 3D print Week 2 untuk fit-check.
-
-### D. Pin Map Detailing (Resolve H8)
+### B. Pin Map Detailing (Resolve H8)
 
 ESP32-S3 N16R8 + OV2640 sudah pakai banyak GPIO untuk camera bus. Pin yang **tersisa** untuk stepper + button + LED harus dipilih dari yang aman.
 
@@ -141,7 +87,7 @@ ESP32-S3 N16R8 + OV2640 sudah pakai banyak GPIO untuk camera bus. Pin yang **ter
 
 **Output Week 1**: tabel pin map FINAL — di-review dengan reviewer eksternal — di-commit ke `CLAUDE_iot.md` menggantikan section tentative.
 
-### E. Power Budget
+### C. Power Budget
 
 | Mode | Draw | Catatan |
 |---|---|---|
@@ -153,7 +99,7 @@ ESP32-S3 N16R8 + OV2640 sudah pakai banyak GPIO untuk camera bus. Pin yang **ter
 
 **Output Week 1**: tabel power budget di-commit. Adapter spec di BOM.
 
-### F. Calibration Plan (eksekusi Week 2)
+### D. Calibration Plan (eksekusi Week 2)
 
 Setelah hardware datang, **sebelum** flash firmware production, jalankan kalibrasi bench. Target: resolve `STOCK_CAPACITY_ROTATIONS` dan `ROTATIONS_PER_TOKEN` actual.
 
@@ -193,7 +139,7 @@ Setelah hardware datang, **sebelum** flash firmware production, jalankan kalibra
 
 **Output Week 2**: laporan kalibrasi + constants final di `CLAUDE_iot.md` config.h.
 
-### G. Test Rig & Dev Environment (siapkan Week 1)
+### E. Test Rig & Dev Environment (siapkan Week 1)
 
 - [ ] Bench power supply atau adapter + multimeter
 - [ ] Soldering station + flux + helping hands
@@ -205,7 +151,7 @@ Setelah hardware datang, **sebelum** flash firmware production, jalankan kalibra
 - [ ] PlatformIO + Visual Studio Code + C/C++ extension
 - [ ] Git client (commit per fitur)
 
-### H. Compliance (Indonesia)
+### F. Compliance (Indonesia)
 
 Untuk dipasang di area publik dan menerima donasi, perangkat sebaiknya:
 
@@ -216,7 +162,7 @@ Untuk dipasang di area publik dan menerima donasi, perangkat sebaiknya:
 
 **Output**: catatan compliance + estimasi biaya sertifikasi (kalau scaling).
 
-### I. Vendor & Supplier Map
+### G. Vendor & Supplier Map
 
 Identifikasi minimal 2 supplier per komponen kritis (avoid single-source risk):
 
@@ -231,7 +177,7 @@ Identifikasi minimal 2 supplier per komponen kritis (avoid single-source risk):
 
 **Output Week 1**: kontak vendor + harga + lead time per komponen.
 
-### J. Field Pilot Lokasi Survey (Week 2)
+### H. Field Pilot Lokasi Survey (Week 2)
 
 Untuk pilot Week 4, scout lokasi yang memenuhi:
 
@@ -250,13 +196,9 @@ Untuk pilot Week 4, scout lokasi yang memenuhi:
 ## Deliverable Checklist Week 1 (IoT)
 
 - [ ] **Schematic** PDF + netlist final (KiCad/EasyEDA)
-- [ ] **BOM** tabel lengkap dengan supplier + harga + lead time
-- [ ] **Mechanical sketch** CAD 2D dispenser + tabung + mount
 - [ ] **Pin map final** override H8 di `CLAUDE_iot.md`
 - [ ] **Power budget** tabel
-- [ ] **Order hardware** placed (target tiba Week 2)
-- [ ] **Test rig** siap di bench
-- [ ] **Mosquitto + mock backend** running di laptop dev
+- [ ] **Test rig** siap di bench (Mosquitto + mock backend)
 - [ ] **Vendor map** dengan minimal 2 supplier per komponen kritis
 - [ ] **HAL abstraction** firmware siap (interface untuk motor, camera, NVS, WiFi, MQTT — supaya native test bisa jalan)
 - [ ] **Native test suite** pertama: `computeStockLevel()`, JSON parser, state machine — semua pass tanpa hardware
