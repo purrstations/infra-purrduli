@@ -35,7 +35,257 @@ Smart Cat Feeder adalah perangkat fisik yang dipasang di area publik untuk membe
 
 ---
 
-## Tech Stack Firmware
+## Pre-Firmware Engineering Plan (Week 1–2)
+
+Hardware engineer kerja **paralel** dengan firmware dev. Sebelum board datang dan firmware bisa di-flash, banyak hal harus disusun supaya saat hardware tiba, firmware tinggal validasi assumption — bukan re-engineer dari nol. Section ini = daftar deliverable Week 1–2 yang **non-firmware tapi blocking firmware**.
+
+### A. Schematic Design (Circuit Diagram)
+
+Pakai **KiCad** (open source, native multiplatform) atau **EasyEDA** (browser-based, langsung kirim ke JLCPCB untuk fab). Output: file `.kicad_sch` + PDF + netlist.
+
+**Blok wajib:**
+
+| Blok | Komponen kunci | Catatan |
+|---|---|---|
+| **Power input** | Konektor DC barrel atau XT60, fuse 3A polyfuse, TVS diode | Input 12 V dari adaptor |
+| **Buck 12 V → 5 V** | LM2596 / MP1584 atau modul XL4015 | Arus 2 A min untuk ESP32 + camera + buffer |
+| **LDO 5 V → 3.3 V** | AMS1117 atau onboard ESP32-S3 | ESP32-S3 dev board biasanya sudah include |
+| **Stepper driver** | A4988 / DRV8825 / TMC2208 (paling sunyi) | Vmot 12 V, logic 3.3 V (cek datasheet driver) |
+| **Decoupling** | 470 µF elco di Vmot stepper, 10 µF + 100 nF di tiap IC | Tanpa ini → camera reset saat stepper aktif |
+| **Reset / Boot** | BOOT button (GPIO 0), RST button | BOOT untuk factory reset (long-press 10s) |
+| **Status LED** | RGB onboard (GPIO 48) atau LED diskrit | Indikator state BLE / online / error |
+| **Camera connector** | OV2640 sudah onboard ESP32-S3 N16R8 | Tidak perlu wiring tambahan |
+| **USB-C programming** | USB-C female + USB-CDC built-in ESP32-S3 | Untuk flash + serial debug |
+| **Stepper output** | 4-pin JST-XH ke motor | Twisted pair (reduce EMI) |
+| **Protection** | Brown-out detector aktif (default), TVS di USB, EMI ferrite di stepper line | — |
+
+**Output schematic Week 1**: PDF + netlist, di-review oleh 1 reviewer eksternal (electronics eng lain) sebelum lanjut PCB / breadboard.
+
+### B. Bill of Materials (BOM)
+
+Tabel acuan (harga & supplier Indonesia, isi sendiri saat sourcing):
+
+| Komponen | Spec | Qty/unit | Supplier kandidat | Lead time | Estimasi harga |
+|---|---|---:|---|---|---|
+| ESP32-S3 N16R8 dev board (with OV2640) | "ESP32-S3-CAM" atau "ESP32-S3-WROOM-1 N16R8 + OV2640 module" | 1 | DigiWare, Tokopedia, AliExpress | 1–3 minggu | Rp 150–250 rb |
+| Stepper motor | NEMA 17, 1.8°, holding torque ≥ 0.4 Nm | 1 | Phaeton, Tokopedia | 3–7 hari | Rp 100–150 rb |
+| Stepper driver | TMC2208 (sunyi) atau A4988 (murah) | 1 | DigiWare | 3–7 hari | Rp 25–80 rb |
+| Power adapter | 12 V / 3 A DC, plug barrel 5.5×2.1 | 1 | Tokopedia | 3 hari | Rp 50 rb |
+| Buck converter | LM2596 module 12V→5V/2A | 1 | DigiWare | 3 hari | Rp 15 rb |
+| Decoupling caps | 470 µF/25V elco + 10 µF tantalum + 100 nF ceramic | 5 set | DigiWare | 3 hari | Rp 10 rb |
+| MiFi pocket router | Telkomsel Orbit / XL Home / Smartfren MiFi | 1 | retailer ops | 1 hari | Rp 500 rb–1 jt |
+| Kartu SIM data | unlimited 50 GB/bln min | 1 | operator | 1 hari | Rp 100 rb/bln |
+| Vibration damper | Rubber grommet M4/M5 (4 pcs) | 1 set | toko hardware | 1 hari | Rp 10 rb |
+| Enclosure | 3D print PETG/ABS atau cetak vendor | 1 | Tokopedia 3D print | 5–10 hari | Rp 100–300 rb |
+| Konektor + kabel | JST-XH 4P, AWG 22 twisted pair, ferrite bead | 1 set | DigiWare | 3 hari | Rp 30 rb |
+| Camera lens cover IP | Kaca tahan air clear acrylic 30 mm | 1 | toko outdoor | 3 hari | Rp 15 rb |
+
+**Target total BOM** per unit: **Rp 1.2–1.8 jt** (Phase 1 prototype). Iterasi cost-down saat scaling (TMC2208 → A4988, dev board → bare module).
+
+**Order Week 1**, hardware tiba Week 2.
+
+### C. Mechanical Design
+
+Software tidak peduli geometri fisik, tapi **kalibrasi `STOCK_CAPACITY_ROTATIONS` 100% bergantung dimensi tabung + dispenser**. Hardware/mech designer harus jadwalkan paralel.
+
+**Sub-blok:**
+
+1. **Dispenser type** — pilih satu:
+   - **Auger screw** — paling akurat per rotasi, tapi pakan kering kecil only. Cocok untuk kibble standar.
+   - **Drum dengan slot** — sederhana, rotasi penuh = 1 porsi. Akurasi ±20%.
+   - **Paddle** — kontrol berdasarkan derajat. Rentan stuck.
+   - **Rekomendasi Phase 1**: drum slot — paling forgiving untuk berbagai ukuran pakan.
+
+2. **Tabung pakan** — silinder transparan (PETG) supaya teknisi bisa lihat level visual:
+   - Kapasitas target: **2 kg** pakan kering (sekitar 200 mangkok @10 g)
+   - Tutup atas dengan engsel + magnetic latch (refill cepat tanpa tool)
+   - Drainase bawah ke dispenser
+
+3. **Camera mount** — bracket terpisah dari motor mount, di-isolasi dengan rubber grommet 4 titik. FOV ke arah bowl (sudut 30–45° dari atas), jarak optimal 40–60 cm.
+
+4. **Motor mount** — pelat aluminium tebal 2 mm, ground ke chassis. Vibration damper antara motor dan chassis.
+
+5. **Enclosure outdoor** — IP65 minimum:
+   - Cable gland untuk power input
+   - Vent screen anti-air (hidrofobik mesh)
+   - Camera lens cover dengan defog coating (opsional)
+   - Mounting hole untuk wall/pole
+
+6. **Akses servis** — teknisi harus bisa buka tutup tabung tanpa unscrew enclosure utama.
+
+**Output Week 1**: sketsa CAD 2D + dimensi (Fusion 360 / OnShape / FreeCAD). 3D print Week 2 untuk fit-check.
+
+### D. Pin Map Detailing (Resolve H8)
+
+ESP32-S3 N16R8 + OV2640 sudah pakai banyak GPIO untuk camera bus. Pin yang **tersisa** untuk stepper + button + LED harus dipilih dari yang aman.
+
+**GPIO yang reserved (jangan dipakai):**
+- Strapping pins (jangan tied input saat boot): GPIO 0, 3, 45, 46
+- PSRAM: GPIO 35, 36, 37 (ESP32-S3 N16R8)
+- Camera DVP: GPIO 4, 5, 11, 12, 13, 14, 15, 16, 17, 18 (cek datasheet board spesifik — variasi antar vendor)
+- USB-CDC: GPIO 19, 20
+- Onboard RGB LED: GPIO 48 (kalau ada)
+
+**GPIO yang aman dipakai (umumnya):** 1, 2, 21, 38, 39, 40, 41, 42, 47.
+
+**Final pin map yang harus diisi** (override section "Hardware Pin Mapping" di doc ini):
+
+| Fungsi | GPIO kandidat | Catatan |
+|---|---|---|
+| Stepper STEP | 38 | Frekuensi tinggi, gunakan RMT/MCPWM peripheral |
+| Stepper DIR | 39 | Slow change |
+| Stepper EN (active low) | 40 | Default HIGH (motor off) di boot |
+| Stepper DIAG/FAULT | 41 | Opsional (TMC2208 stallGuard) |
+| BLE/factory reset button | 0 | BOOT button sudah ada |
+| Status LED tambahan | 47 | Kalau LED RGB onboard tidak cukup |
+
+**Output Week 1**: tabel pin map FINAL — di-review dengan reviewer eksternal — di-commit ke `CLAUDE_iot.md` menggantikan section tentative.
+
+### E. Power Budget
+
+| Mode | Draw | Catatan |
+|---|---|---|
+| Idle (WiFi connected, MQTT loop) | 80–150 mA @ 5 V | ESP32-S3 + camera standby |
+| Streaming aktif (camera DMA + JPEG + RTSP) | 250–350 mA @ 5 V | Bisa lebih kalau quality tinggi |
+| Stepper running (1.5 A coils) | 1.5–2.5 A @ 12 V | Spike 2× saat start/stop |
+| **Peak feeding + streaming** | ESP side 350 mA @ 5V + stepper 2 A @ 12V | **Adapter wajib 12 V / 3 A min** |
+| Brown-out threshold | ~2.7 V VBAT | Default ESP32-S3 aktif |
+
+**Output Week 1**: tabel power budget di-commit. Adapter spec di BOM.
+
+### F. Calibration Plan (eksekusi Week 2)
+
+Setelah hardware datang, **sebelum** flash firmware production, jalankan kalibrasi bench. Target: resolve `STOCK_CAPACITY_ROTATIONS` dan `ROTATIONS_PER_TOKEN` actual.
+
+**Test rig minimal:**
+- Bench power supply 12 V / 5 A adjustable (atau adapter + Watt meter)
+- Digital scale 0.1 g resolusi
+- Stopwatch / serial logger
+- Tabung pakan terisi penuh
+- Bowl wadah pakai
+
+**Test 1: gram per rotasi**
+- Rotasi 1× → timbang → catat.
+- Ulangi 10× → ambil rata-rata + stddev.
+- Target: gram/rotasi konsisten ±10%.
+- Hasil → set `ROTATIONS_PER_TOKEN` di env (mis. kalau 1 rotasi = 10 g dan 1 token = 10 g target → ratio 1:1).
+
+**Test 2: stock capacity**
+- Isi tabung penuh, jalankan rotasi terus-menerus sampai pakan habis (dispenser kosong).
+- Catat total rotasi sampai habis.
+- Hasil → set `STOCK_CAPACITY_ROTATIONS` (mis. 200 rotasi untuk tabung 2 kg).
+
+**Test 3: stepper speed sweet spot**
+- Coba speed 100, 200, 400, 800 steps/sec.
+- Cari yang tidak bikin pakan clog tapi tidak terlalu lambat.
+- Set speed final di firmware constant.
+
+**Test 4: vibration on camera**
+- Pasang kamera dengan + tanpa damper.
+- Streaming + run stepper → cek frame.
+- Validasi acceptable blur.
+
+**Test 5: power sag**
+- Hook scope ke 5 V rail.
+- Trigger stepper saat streaming.
+- Cek tegangan tidak drop < 4.6 V (brown-out).
+- Kalau drop → upgrade adapter atau tambah cap.
+
+**Output Week 2**: laporan kalibrasi + constants final di `CLAUDE_iot.md` config.h.
+
+### G. Test Rig & Dev Environment (siapkan Week 1)
+
+- [ ] Bench power supply atau adapter + multimeter
+- [ ] Soldering station + flux + helping hands
+- [ ] Logic analyzer / scope (untuk debug MQTT + stepper timing)
+- [ ] **Mosquitto MQTT broker lokal** (Docker) untuk dev tanpa cloud
+- [ ] **Mock backend** Python script: terima `events/*`, publish `commands/feed` periodik (template ada di `tools/mock_backend.py` — dibuat Week 1)
+- [ ] Mock MiFi: router WiFi dengan SSID/pass yang match config
+- [ ] Serial monitor minimal 921600 baud (default ESP32-S3)
+- [ ] PlatformIO + Visual Studio Code + C/C++ extension
+- [ ] Git client (commit per fitur)
+
+### H. Compliance (Indonesia)
+
+Untuk dipasang di area publik dan menerima donasi, perangkat sebaiknya:
+
+- **SDPPI sertifikasi** — perangkat radio (WiFi + BLE) wajib sertifikasi Kominfo untuk dijual. Pakai ESP32 yang sudah ber-sertifikat (banyak vendor jual modul sudah include sertifikat dengan tambahan biaya). Phase 1 prototype tidak butuh, scaling iya.
+- **SNI adapter** — power adapter wajib lulus SNI 04-6203.1.
+- **IP rating** — IP65 minimum untuk outdoor (semi-tertutup), IP67 kalau sepenuhnya outdoor terbuka.
+- **Safety motor pinch** — guard fisik supaya jari tidak masuk ke dispenser mekanis. Penting untuk lokasi dengan anak-anak.
+
+**Output**: catatan compliance + estimasi biaya sertifikasi (kalau scaling).
+
+### I. Vendor & Supplier Map
+
+Identifikasi minimal 2 supplier per komponen kritis (avoid single-source risk):
+
+| Kategori | Primary | Backup |
+|---|---|---|
+| ESP32-S3 board | DigiWare (Jakarta) | AliExpress (lead time +1 minggu) |
+| Stepper | Phaeton Robotics | Tokopedia "NEMA 17 1.8" |
+| Driver | DigiWare TMC2208 | Tokopedia A4988 module |
+| MiFi + SIM | Telkomsel Orbit | XL Home |
+| 3D print | Vendor lokal (cek review Tokopedia) | In-house printer Phase 2 |
+| PCB fab (Phase 2) | JLCPCB (China, $5/5pcs + shipping) | PCBWay |
+
+**Output Week 1**: kontak vendor + harga + lead time per komponen.
+
+### J. Field Pilot Lokasi Survey (Week 2)
+
+Untuk pilot Week 4, scout lokasi yang memenuhi:
+
+- [ ] Sinyal MiFi cukup (min RSSI -75 dBm). Tes pakai HP app "WiFi Analyzer" di lokasi.
+- [ ] Stop kontak AC 220 V tersedia dalam jarak < 3 m. Atau extension cord aman.
+- [ ] Atap teduh — hindari direct sunlight ke kamera + tabung pakan (panas → spoil).
+- [ ] Akses teknisi mudah untuk refill rutin (≤ 30 menit perjalanan dari basecamp).
+- [ ] Populasi kucing terkonfirmasi (survei 3 hari, hitung visit kucing).
+- [ ] Izin pemilik lokasi (RT/RW/pengelola).
+- [ ] Tidak rawan vandalisme / pencurian (lighting cukup, ada CCTV area).
+
+**Output**: 3 kandidat lokasi dengan ranking + foto + koordinat GPS.
+
+---
+
+## Deliverable Checklist Week 1 (IoT)
+
+- [ ] **Schematic** PDF + netlist final (KiCad/EasyEDA)
+- [ ] **BOM** tabel lengkap dengan supplier + harga + lead time
+- [ ] **Mechanical sketch** CAD 2D dispenser + tabung + mount
+- [ ] **Pin map final** override H8 di `CLAUDE_iot.md`
+- [ ] **Power budget** tabel
+- [ ] **Order hardware** placed (target tiba Week 2)
+- [ ] **Test rig** siap di bench
+- [ ] **Mosquitto + mock backend** running di laptop dev
+- [ ] **Vendor map** dengan minimal 2 supplier per komponen kritis
+- [ ] **HAL abstraction** firmware siap (interface untuk motor, camera, NVS, WiFi, MQTT — supaya native test bisa jalan)
+- [ ] **Native test suite** pertama: `computeStockLevel()`, JSON parser, state machine — semua pass tanpa hardware
+
+## Deliverable Week 2 (IoT)
+
+- [ ] Hardware tiba + assembly prototype 1 unit
+- [ ] Smoke test: power on → boot → BLE GATT aktif
+- [ ] Pairing test dengan mock app (BLE)
+- [ ] WiFi + MQTT TLS handshake on-target
+- [ ] Stepper rotasi controlled via MQTT command (mock backend)
+- [ ] Kalibrasi gram/rotasi → set `ROTATIONS_PER_TOKEN`
+- [ ] Kalibrasi capacity → set `STOCK_CAPACITY_ROTATIONS`
+- [ ] Camera init + RTSP push ke mediamtx lokal (Docker)
+- [ ] 24h soak test (jalankan device terus-menerus, hitung NVS write, heap, reset count)
+- [ ] **Lokasi pilot dipilih** (top 1 dari 3 kandidat survei)
+
+---
+
+## Catatan untuk Hardware Engineer
+
+- **Jangan over-engineer** prototype Phase 1. Pakai dev board off-the-shelf (ESP32-S3-CAM dengan OV2640 sudah include), driver module breakout, jumper wire. PCB custom = Phase 2 setelah BOM stabil.
+- **Dokumentasikan setiap kompromi** ke `CLAUDE_iot.md` — kalau pilih A4988 vs TMC2208 karena cost, catat alasannya supaya next eng tidak terkaget.
+- **Foto + video** assembly process. Berguna untuk training teknisi lapangan.
+- **Backup unit** — pesan 2 dev board ESP32 sekaligus. Kalau 1 rusak saat dev, prototype tidak stall.
+
+---
+
+
 
 | Hal | Pilihan |
 |---|---|
