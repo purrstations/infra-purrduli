@@ -23,6 +23,16 @@ jobs:
           # Validasi key valid
           ssh-keygen -l -f ~/.ssh/deploy_key
 
+      - name: Test SSH verbose
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -vvv -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o PasswordAuthentication=no \
+            $VPS_USER@$VPS_HOST 'echo SSH_OK' 2>&1 || true
+
       - name: Deploy ke VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
