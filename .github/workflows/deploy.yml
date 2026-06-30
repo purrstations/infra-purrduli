@@ -22,7 +22,6 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           # Validasi key valid
           ssh-keygen -l -f ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
       - name: Deploy ke VPS
         env:
