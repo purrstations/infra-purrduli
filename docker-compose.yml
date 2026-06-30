@@ -15,18 +15,22 @@ services:
   mqtt:
     image: emqx/emqx:latest
     restart: unless-stopped
+    env_file: .env
     ports:
-      - "1883:1883"   # MQTT (internal, bisa di-close kalau sudah TLS only)
-      - "8883:8883"   # MQTT over TLS
-      - "18083:18083" # EMQX dashboard
+      - "1883:1883"             # MQTT plain (bisa di-close setelah testing)
+      - "8883:8883"             # MQTT over TLS
+      - "127.0.0.1:18083:18083" # EMQX dashboard — localhost only
     volumes:
       - emqx_data:/opt/emqx/data
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
     networks:
       - internal
 
   mediamtx:
     image: bluenviron/mediamtx:latest
     restart: unless-stopped
+    env_file: .env
     ports:
       - "8554:8554"       # RTSP
       - "8888:8888"       # HLS
@@ -45,7 +49,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     networks:
       - internal
