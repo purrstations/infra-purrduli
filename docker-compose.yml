@@ -55,9 +55,9 @@ services:
     environment:
       MEDIAMTX_HOST: mediamtx        # nama service di network `internal`, bukan 127.0.0.1
       MEDIAMTX_RTSP_PORT: 8554
-      # Tanpa MEDIAMTX_USER -- publish sekarang diizinkan via IP (lihat
-      # mediamtx.yml), bukan username/password. server.js otomatis skip
-      # kredensial di URL kalau MEDIAMTX_USER kosong.
+      MEDIAMTX_USER: purrtein        # RTSP tetap kirim WWW-Authenticate: Basic
+                                      # walau IP sudah di-whitelist -- perlu
+                                      # kredensial buat jawab challenge-nya.
     ports:
       - "8080:8080"                  # ESP32 push ke sini
     depends_on:
