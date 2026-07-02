@@ -14,6 +14,15 @@
 # step, self-heals on every renewal automatically.
 set -e
 GID=10001
+
+# certbot's actual default: archive/ itself (not just archive/<domain>/) is
+# 700 root — that's the real traversal blocker, missed in the first pass of
+# this script (fixing only the per-domain subfolder wasn't enough, since a
+# process needs execute permission on every directory in the path, not just
+# the last one).
+chgrp "$GID" /etc/letsencrypt/archive /etc/letsencrypt/live
+chmod 750 /etc/letsencrypt/archive /etc/letsencrypt/live
+
 for domain_dir in /etc/letsencrypt/archive/*/; do
   chgrp "$GID" "$domain_dir"
   chmod 750 "$domain_dir"

@@ -84,6 +84,14 @@ jobs:
                 echo "==> Rebuild mjpeg-ingest..."
                 docker compose up -d --build mjpeg-ingest
               fi
+
+              if echo "$CHANGED" | grep -q "^certbot/"; then
+                echo "==> Restart certbot (re-run fix-cert-perms.sh + renew)..."
+                docker compose restart certbot
+                echo "==> Restart mqtt (re-read cert now that perms are fixed)..."
+                sleep 3   # let fix-cert-perms.sh finish before mqtt re-reads
+                docker compose restart mqtt
+              fi
             fi
 
             # health check
