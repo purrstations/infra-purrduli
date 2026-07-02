@@ -1,4 +1,4 @@
-logLevel: info
+logLevel: debug
 
 api: yes
 apiAddress: :9997
