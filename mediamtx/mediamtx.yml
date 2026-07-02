@@ -15,11 +15,19 @@ webrtcAddress: :8889
 # Auth
 authMethod: internal
 authInternalUsers:
+  # Publik boleh nonton stream (WebRTC page) tanpa login sama sekali.
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+
+  # Kredensial dipakai mjpeg-ingest-server buat publish RTSP, plus akses
+  # api/metrics/pprof buat debugging.
   - user: purrtein
     pass: ${MEDIAMTX_PASS}
     permissions:
       - action: publish
-      - action: read
       - action: playback
       - action: api
       - action: metrics
