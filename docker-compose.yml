@@ -55,7 +55,9 @@ services:
     environment:
       MEDIAMTX_HOST: mediamtx        # nama service di network `internal`, bukan 127.0.0.1
       MEDIAMTX_RTSP_PORT: 8554
-      MEDIAMTX_USER: purrtein        # cocok dengan authInternalUsers di mediamtx.yml
+      # Tanpa MEDIAMTX_USER -- publish sekarang diizinkan via IP (lihat
+      # mediamtx.yml), bukan username/password. server.js otomatis skip
+      # kredensial di URL kalau MEDIAMTX_USER kosong.
     ports:
       - "8080:8080"                  # ESP32 push ke sini
     depends_on:

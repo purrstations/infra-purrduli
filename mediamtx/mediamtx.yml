@@ -1,4 +1,4 @@
-logLevel: debug
+logLevel: info
 
 api: yes
 apiAddress: :9997
@@ -15,11 +15,15 @@ webrtcAddress: :8889
 # Auth
 authMethod: internal
 authInternalUsers:
-  # User spesifik duluan — kalau `any` di-cek lebih dulu, request yang
-  # bawa kredensial purrtein ke-match ke `any` duluan (yang cuma boleh
-  # read) dan publish ke-reject 401 sebelum sempat dicek ke rule ini.
-  - user: purrtein
-    pass: ${MEDIAMTX_PASS}
+  # Publish diizinkan berdasarkan IP docker network internal, bukan
+  # username/password -- ffmpeg (mjpeg-ingest-server) berulang kali kena
+  # 401 di ANNOUNCE meski kredensial sudah benar & rtspAuthMethods default
+  # basic; ini keterbatasan/quirk RTSP output-muxer ffmpeg, bukan salah
+  # config mediamtx. IP-based auth sidestep masalah itu karena gak perlu
+  # challenge-response sama sekali. Tetap aman: 172.16.0.0/12 cuma
+  # reachable dari dalam docker bridge network host ini, bukan internet.
+  - user: any
+    ips: ["172.16.0.0/12", "127.0.0.1"]
     permissions:
       - action: publish
       - action: playback
@@ -29,7 +33,6 @@ authInternalUsers:
 
   # Publik boleh nonton stream (WebRTC page) tanpa login sama sekali.
   - user: any
-    pass:
     ips: []
     permissions:
       - action: read
