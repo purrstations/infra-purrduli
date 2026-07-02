@@ -11,6 +11,7 @@ hlsAddress: :8888
 
 webrtc: yes
 webrtcAddress: :8889
+webrtcICEUDPMuxAddress: :8189
 
 # Auth
 authMethod: internal
