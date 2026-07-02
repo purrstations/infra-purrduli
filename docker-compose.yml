@@ -41,6 +41,21 @@ services:
     networks:
       - internal
 
+  mjpeg-ingest:
+    build: ./mjpeg-ingest-server
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MEDIAMTX_HOST: mediamtx        # nama service di network `internal`, bukan 127.0.0.1
+      MEDIAMTX_RTSP_PORT: 8554
+      MEDIAMTX_USER: purrtein        # cocok dengan authInternalUsers di mediamtx.yml
+    ports:
+      - "8080:8080"                  # ESP32 push ke sini
+    depends_on:
+      - mediamtx
+    networks:
+      - internal
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped

@@ -62,7 +62,7 @@ jobs:
             if echo "$CHANGED" | grep -q "^docker-compose"; then
               echo "==> Full redeploy..."
               docker compose pull
-              docker compose up -d --remove-orphans
+              docker compose up -d --build --remove-orphans
             else
               # restart selektif
               if echo "$CHANGED" | grep -q "^nginx/"; then
@@ -78,6 +78,11 @@ jobs:
               if echo "$CHANGED" | grep -q "^emqx/"; then
                 echo "==> Restart mqtt..."
                 docker compose restart mqtt
+              fi
+
+              if echo "$CHANGED" | grep -q "^mjpeg-ingest-server/"; then
+                echo "==> Rebuild mjpeg-ingest..."
+                docker compose up -d --build mjpeg-ingest
               fi
             fi
 
