@@ -84,4 +84,18 @@ test('empty buffer returns empty leftover, no crash', () => {
   assert.strictEqual(leftover.length, 0);
 });
 
+test('stale partial data from dropped TCP is discarded on reconnect', () => {
+  // Simulate: old connection left a partial frame in session.buf.
+  // New connection sends fresh complete frames. Parser should sync to first boundary.
+  const stale  = Buffer.from('garbage-from-dropped-tcp-partial-frame');
+  const jpeg   = Buffer.from('fresh-frame-after-reconnect');
+  const frames = [];
+  // On reconnect server.js resets session.buf, but test the framing layer's
+  // own resilience: even if stale bytes were prepended, it skips to next boundary.
+  const leftover = drainParts(Buffer.concat([stale, part(jpeg)]), (f) => frames.push(f));
+  assert.strictEqual(frames.length, 1);
+  assert.ok(frames[0].equals(jpeg));
+  assert.strictEqual(leftover.length, 0);
+});
+
 console.log('All framing.test.js checks passed.');

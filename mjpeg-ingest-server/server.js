@@ -22,6 +22,7 @@ const MEDIAMTX_USER       = process.env.MEDIAMTX_USER || '';
 const MEDIAMTX_PASS       = process.env.MEDIAMTX_PASS || '';
 const INGEST_TOKEN        = process.env.INGEST_TOKEN;
 const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
+const MAX_BUF_BYTES       = parseInt(process.env.MAX_BUF_BYTES || String(2 * 1024 * 1024), 10);  // 2 MB
 
 if (!INGEST_TOKEN) {
   console.error('[ingest] INGEST_TOKEN env var not set — refusing to start unauthenticated on a public port.');
@@ -36,10 +37,9 @@ function mediamtxUrl(deviceId) {
   return `rtsp://${auth}${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${deviceId}`;
 }
 
-function startFfmpeg(deviceId) {
-  const url = mediamtxUrl(deviceId);
-  const fps = process.env.STREAM_FPS || '15';
-  const proc = spawn('ffmpeg', [
+function ffmpegArgs(deviceId) {
+  const fps  = process.env.STREAM_FPS || '15';
+  const base = [
     '-f', 'mjpeg', '-framerate', fps, '-i', 'pipe:0',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
     '-r', fps,
@@ -47,9 +47,22 @@ function startFfmpeg(deviceId) {
     '-b:v', '800k', '-bufsize', '800k',
     '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
     '-an',
-    '-f', 'rtsp', '-rtsp_transport', 'tcp', url,
-  ]);
+  ];
+  if (process.env.TEST_MODE === '1') {
+    // Validate H264 encoding without pushing anywhere. ffmpeg stderr shows errors.
+    return [...base, '-f', 'null', '-'];
+  }
+  return [...base, '-f', 'rtsp', '-rtsp_transport', 'tcp', mediamtxUrl(deviceId)];
+}
+
+function startFfmpeg(deviceId) {
+  const args = ffmpegArgs(deviceId);
+  const proc = spawn('ffmpeg', args);
   proc.stderr.on('data', (d) => process.stderr.write(`[ffmpeg ${deviceId}] ${d}`));
+  proc.stdin.on('error', (err) => {
+    // EPIPE when ffmpeg dies unexpectedly — log and let proc 'exit' clean up.
+    console.error(`[ingest] ffmpeg stdin error for ${deviceId}: ${err.message}`);
+  });
   proc.on('exit', (code) => {
     console.log(`[ingest] ffmpeg for ${deviceId} exited (code=${code})`);
     const s = sessions.get(deviceId);
@@ -59,7 +72,8 @@ function startFfmpeg(deviceId) {
     console.error(`[ingest] ffmpeg for ${deviceId} failed to start: ${err.message}`);
     sessions.delete(deviceId);
   });
-  console.log(`[ingest] ffmpeg started for ${deviceId} -> ${url}`);
+  const dest = process.env.TEST_MODE === '1' ? 'null (TEST_MODE)' : mediamtxUrl(deviceId);
+  console.log(`[ingest] ffmpeg started for ${deviceId} -> ${dest}`);
   return proc;
 }
 
@@ -83,12 +97,24 @@ const server = http.createServer((req, res) => {
     // ESP32 reconnected before kill timer fired — resume the same ffmpeg session.
     clearTimeout(session.killTimer);
     session.killTimer = null;
+    session.buf = Buffer.alloc(0);  // discard stale partial frame from old TCP connection
     console.log(`[ingest] ${deviceId} reconnected — resuming ffmpeg`);
   }
   console.log(`[ingest] ${deviceId} connected from ${req.socket.remoteAddress}`);
 
   req.on('data', (chunk) => {
-    session.buf = drainParts(Buffer.concat([session.buf, chunk]), (jpeg) => {
+    const combined = Buffer.concat([session.buf, chunk]);
+    if (combined.length > MAX_BUF_BYTES) {
+      console.error(`[ingest] ${deviceId} buf exceeded ${MAX_BUF_BYTES} bytes — resetting (stream corrupt?)`);
+      session.buf = Buffer.alloc(0);
+      return;
+    }
+    session.buf = drainParts(combined, (jpeg) => {
+      if (process.env.DEBUG_FRAMES === '1') {
+        const soi = jpeg[0] === 0xff && jpeg[1] === 0xd8;
+        const eoi = jpeg[jpeg.length - 2] === 0xff && jpeg[jpeg.length - 1] === 0xd9;
+        console.log(`[frame ${deviceId}] ${jpeg.length}B  SOI:${soi ? 'ok' : 'BAD'}  EOI:${eoi ? 'ok' : 'BAD'}`);
+      }
       if (session.proc.stdin.writable) session.proc.stdin.write(jpeg);
     });
   });
