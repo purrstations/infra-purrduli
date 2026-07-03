@@ -53,7 +53,10 @@ function startFfmpeg(deviceId) {
   proc.stderr.on('data', (d) => process.stderr.write(`[ffmpeg ${deviceId}] ${d}`));
   proc.on('exit', (code) => {
     console.log(`[ingest] ffmpeg for ${deviceId} exited (code=${code})`);
-    sessions.delete(deviceId);
+    // Only delete if the session still points to THIS proc — a new connection
+    // may have already spawned a replacement before this exit fires.
+    const s = sessions.get(deviceId);
+    if (s && s.proc === proc) sessions.delete(deviceId);
   });
   // Without this, a spawn failure (e.g. ffmpeg missing from PATH) is an
   // unhandled 'error' event that crashes the whole process — taking down
