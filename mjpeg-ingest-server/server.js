@@ -7,26 +7,28 @@
 // Frame JPEG mentah di-pipe ke stdin proses ffmpeg (satu proses per device_id,
 // reused antar-frame), yang transcode ke H264 dan push RTSP langsung ke mediamtx.
 //
-// Jalanin: INGEST_PORT=8080 node server.js
-// (lihat README.md di folder ini buat deploy systemd/pm2 + env vars lain)
+// Reconnect resilience: kalau TCP drop (bukan clean stream_stop), ffmpeg tetap
+// hidup di mediamtx selama RECONNECT_WINDOW_MS. Waktu ESP32 reconnect, lanjut
+// nulis ke ffmpeg yang sama — path mediamtx tidak hilang.
 
 const http = require('http');
 const { spawn } = require('child_process');
 const { drainParts } = require('./framing');
 
-const PORT             = parseInt(process.env.INGEST_PORT || '8080', 10);
-const MEDIAMTX_HOST    = process.env.MEDIAMTX_HOST || '127.0.0.1';
-const MEDIAMTX_PORT    = process.env.MEDIAMTX_RTSP_PORT || '8554';
-const MEDIAMTX_USER    = process.env.MEDIAMTX_USER || '';
-const MEDIAMTX_PASS    = process.env.MEDIAMTX_PASS || '';
-const INGEST_TOKEN     = process.env.INGEST_TOKEN;
+const PORT                = parseInt(process.env.INGEST_PORT || '8080', 10);
+const MEDIAMTX_HOST       = process.env.MEDIAMTX_HOST || '127.0.0.1';
+const MEDIAMTX_PORT       = process.env.MEDIAMTX_RTSP_PORT || '8554';
+const MEDIAMTX_USER       = process.env.MEDIAMTX_USER || '';
+const MEDIAMTX_PASS       = process.env.MEDIAMTX_PASS || '';
+const INGEST_TOKEN        = process.env.INGEST_TOKEN;
+const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
 
 if (!INGEST_TOKEN) {
   console.error('[ingest] INGEST_TOKEN env var not set — refusing to start unauthenticated on a public port.');
   process.exit(1);
 }
 
-// device_id -> { proc, buf }
+// device_id -> { proc, buf, killTimer }
 const sessions = new Map();
 
 function mediamtxUrl(deviceId) {
@@ -38,14 +40,11 @@ function startFfmpeg(deviceId) {
   const url = mediamtxUrl(deviceId);
   const fps = process.env.STREAM_FPS || '15';
   const proc = spawn('ffmpeg', [
-    // Input: tell ffmpeg the real framerate so timestamps are correct.
-    // Without -framerate, mjpeg demuxer guesses 25fps → timing chaos → speed=0.27x.
     '-f', 'mjpeg', '-framerate', fps, '-i', 'pipe:0',
-    // Encode: ultrafast + zerolatency + nobuffer flags reduce pipeline latency.
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    '-r', fps,          // output fps must match input
-    '-g', String(parseInt(fps) * 2),  // keyframe every 2s — faster seek for WebRTC
-    '-b:v', '800k', '-bufsize', '800k',  // cap bitrate so RTSP doesn't stall mediamtx
+    '-r', fps,
+    '-g', String(parseInt(fps) * 2),
+    '-b:v', '800k', '-bufsize', '800k',
     '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
     '-an',
     '-f', 'rtsp', '-rtsp_transport', 'tcp', url,
@@ -53,14 +52,9 @@ function startFfmpeg(deviceId) {
   proc.stderr.on('data', (d) => process.stderr.write(`[ffmpeg ${deviceId}] ${d}`));
   proc.on('exit', (code) => {
     console.log(`[ingest] ffmpeg for ${deviceId} exited (code=${code})`);
-    // Only delete if the session still points to THIS proc — a new connection
-    // may have already spawned a replacement before this exit fires.
     const s = sessions.get(deviceId);
     if (s && s.proc === proc) sessions.delete(deviceId);
   });
-  // Without this, a spawn failure (e.g. ffmpeg missing from PATH) is an
-  // unhandled 'error' event that crashes the whole process — taking down
-  // every other device's stream, not just this one.
   proc.on('error', (err) => {
     console.error(`[ingest] ffmpeg for ${deviceId} failed to start: ${err.message}`);
     sessions.delete(deviceId);
@@ -83,15 +77,15 @@ const server = http.createServer((req, res) => {
 
   let session = sessions.get(deviceId);
   if (!session) {
-    session = { proc: startFfmpeg(deviceId), buf: Buffer.alloc(0) };
+    session = { proc: startFfmpeg(deviceId), buf: Buffer.alloc(0), killTimer: null };
     sessions.set(deviceId, session);
+  } else if (session.killTimer) {
+    // ESP32 reconnected before kill timer fired — resume the same ffmpeg session.
+    clearTimeout(session.killTimer);
+    session.killTimer = null;
+    console.log(`[ingest] ${deviceId} reconnected — resuming ffmpeg`);
   }
   console.log(`[ingest] ${deviceId} connected from ${req.socket.remoteAddress}`);
-
-  // Send 200 OK immediately — without a response, MiFi/NAT resets the TCP
-  // connection after ~2s waiting for a server reply to the HTTP POST.
-  res.writeHead(200, { 'Content-Type': 'text/plain', 'Connection': 'keep-alive' });
-  res.flushHeaders();
 
   req.on('data', (chunk) => {
     session.buf = drainParts(Buffer.concat([session.buf, chunk]), (jpeg) => {
@@ -99,18 +93,41 @@ const server = http.createServer((req, res) => {
     });
   });
 
-  const cleanup = () => {
-    console.log(`[ingest] ${deviceId} disconnected`);
+  let endedClean = false;
+
+  req.on('end', () => {
+    // ESP32 sent the HTTP chunked terminator (0\r\n\r\n) — clean stream_stop.
+    endedClean = true;
+    console.log(`[ingest] ${deviceId} stream ended (clean stop)`);
     const s = sessions.get(deviceId);
-    if (s) { s.proc.stdin.end(); sessions.delete(deviceId); }
+    if (s) {
+      if (s.killTimer) clearTimeout(s.killTimer);
+      s.proc.stdin.end();
+      sessions.delete(deviceId);
+    }
     if (!res.writableEnded) res.end();
-  };
-  // 'end' = device sent the terminating chunk (clean stopStream()); 'close' =
-  // socket dropped (device reset/network loss) — either way, tear down ffmpeg.
-  req.on('end', cleanup);
-  req.on('close', cleanup);
+  });
+
+  req.on('close', () => {
+    if (endedClean) return;
+    // TCP dropped (WiFi glitch, device reset) — keep ffmpeg alive so mediamtx
+    // path stays up while ESP32 reconnects.
+    console.log(`[ingest] ${deviceId} TCP dropped — keeping ffmpeg for ${RECONNECT_WINDOW_MS / 1000}s`);
+    if (!res.writableEnded) res.end();
+    const s = sessions.get(deviceId);
+    if (s && !s.killTimer) {
+      s.killTimer = setTimeout(() => {
+        const s2 = sessions.get(deviceId);
+        if (s2 && s2.proc === s.proc) {
+          console.log(`[ingest] ${deviceId} no reconnect after ${RECONNECT_WINDOW_MS / 1000}s — stopping ffmpeg`);
+          s2.proc.stdin.end();
+          sessions.delete(deviceId);
+        }
+      }, RECONNECT_WINDOW_MS);
+    }
+  });
 });
 
 server.listen(PORT, () => {
-  console.log(`[ingest] listening on :${PORT} -> mediamtx at ${MEDIAMTX_HOST}:${MEDIAMTX_PORT}`);
+  console.log(`[ingest] listening on :${PORT} -> mediamtx at ${MEDIAMTX_HOST}:${MEDIAMTX_PORT} (reconnect window ${RECONNECT_WINDOW_MS / 1000}s)`);
 });
