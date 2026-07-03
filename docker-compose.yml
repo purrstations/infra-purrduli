@@ -61,8 +61,6 @@ services:
                                       # walau IP sudah di-whitelist -- perlu
                                       # kredensial buat jawab challenge-nya.
       STREAM_FPS: "15"               # harus match STREAM_FPS di firmware config.h
-      TEST_MODE: "1"                 # ponytail: sementara — bypass RTSP push, output null
-      DEBUG_FRAMES: "1"              # ponytail: sementara — log SOI/EOI per frame
     ports:
       - "8080:8080"                  # ESP32 push ke sini
     depends_on:
