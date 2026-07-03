@@ -36,9 +36,17 @@ function mediamtxUrl(deviceId) {
 
 function startFfmpeg(deviceId) {
   const url = mediamtxUrl(deviceId);
+  const fps = process.env.STREAM_FPS || '15';
   const proc = spawn('ffmpeg', [
-    '-f', 'mjpeg', '-i', 'pipe:0',
+    // Input: tell ffmpeg the real framerate so timestamps are correct.
+    // Without -framerate, mjpeg demuxer guesses 25fps → timing chaos → speed=0.27x.
+    '-f', 'mjpeg', '-framerate', fps, '-i', 'pipe:0',
+    // Encode: ultrafast + zerolatency + nobuffer flags reduce pipeline latency.
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+    '-r', fps,          // output fps must match input
+    '-g', String(parseInt(fps) * 2),  // keyframe every 2s — faster seek for WebRTC
+    '-b:v', '800k', '-bufsize', '800k',  // cap bitrate so RTSP doesn't stall mediamtx
+    '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
     '-an',
     '-f', 'rtsp', '-rtsp_transport', 'tcp', url,
   ]);
