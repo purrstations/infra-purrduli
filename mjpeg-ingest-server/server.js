@@ -88,6 +88,11 @@ const server = http.createServer((req, res) => {
   }
   console.log(`[ingest] ${deviceId} connected from ${req.socket.remoteAddress}`);
 
+  // Send 200 OK immediately — without a response, MiFi/NAT resets the TCP
+  // connection after ~2s waiting for a server reply to the HTTP POST.
+  res.writeHead(200, { 'Content-Type': 'text/plain', 'Connection': 'keep-alive' });
+  res.flushHeaders();
+
   req.on('data', (chunk) => {
     session.buf = drainParts(Buffer.concat([session.buf, chunk]), (jpeg) => {
       if (session.proc.stdin.writable) session.proc.stdin.write(jpeg);
