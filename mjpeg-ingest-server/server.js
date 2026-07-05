@@ -40,9 +40,14 @@ function mediamtxUrl(deviceId) {
 function ffmpegArgs(deviceId) {
   const fps  = process.env.STREAM_FPS || '15';
   const base = [
-    '-f', 'mjpeg', '-framerate', fps, '-i', 'pipe:0',
+    // Stempel tiap frame dgn waktu kedatangan nyata — ESP kirim fps variabel (adaptive),
+    // JADI JANGAN pakai -framerate yg mengasumsikan input konstan (bikin PTS meleset →
+    // speed<1x → WebRTC underrun/"loading").
+    '-use_wallclock_as_timestamps', '1',
+    '-f', 'mjpeg', '-i', 'pipe:0',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    '-r', fps,
+    // Output CFR: duplikat frame saat input lambat → 15fps mulus, PTS = real-time.
+    '-fps_mode', 'cfr', '-r', fps,
     '-g', String(parseInt(fps) * 2),
     '-b:v', '800k', '-bufsize', '800k',
     '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
