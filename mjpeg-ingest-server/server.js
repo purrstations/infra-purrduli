@@ -49,10 +49,11 @@ function ffmpegArgs(deviceId) {
     '-pix_fmt', 'yuv420p',
     // Output CFR: duplikat frame saat input lambat → cadence mulus, PTS = real-time.
     '-fps_mode', 'cfr', '-r', fps,
-    // Keyframe reguler tiap 2 dtk supaya segmen HLS (hlsSegmentDuration 2s) rata.
-    // -g = fps*2, plus paksa IDR tepat di kelipatan 2 dtk.
-    '-g', String(parseInt(fps) * 2),
-    '-force_key_frames', 'expr:gte(t,n_forced*2)',
+    // Keyframe reguler tiap 3 dtk supaya segmen HLS (hlsSegmentDuration 3s) rata.
+    // -g = fps*3, plus paksa IDR tepat di kelipatan 3 dtk. Kalau ubah durasi buffer,
+    // ganti angka 3 di sini DAN hlsSegmentDuration di mediamtx.yml agar sinkron.
+    '-g', String(parseInt(fps) * 3),
+    '-force_key_frames', 'expr:gte(t,n_forced*3)',
     '-b:v', '1200k', '-bufsize', '1200k',
     '-an',
   ];

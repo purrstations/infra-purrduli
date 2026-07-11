@@ -11,9 +11,11 @@ hlsAddress: :8888
 # HLS klasik berbuffer (BUKAN lowLatency default). Sumber ESP32 jitter -- send_ms
 # sesekali melonjak ~1.5s (WiFi) -> butuh buffer player yg menyerap gap itu supaya
 # tidak patah-patah. Latency HLS ~ 3 x hlsSegmentDuration (player buffer 3 segmen),
-# jadi 2s -> ~6s delay. Naikkan segmen ke 3s kalau mau ~9-10s.
+# jadi 3s -> ~9s delay. Untuk mengubah buffer, ubah hlsSegmentDuration DI SINI dan
+# SELARASKAN keyframe interval di mjpeg-ingest-server/server.js (-g = fps*N,
+# force_key_frames n_forced*N) supaya segmen tetap rata.
 hlsVariant: fmp4
-hlsSegmentDuration: 2s
+hlsSegmentDuration: 3s
 hlsSegmentCount: 7
 
 webrtc: yes
