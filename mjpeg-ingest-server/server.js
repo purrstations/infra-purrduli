@@ -24,10 +24,8 @@ const INGEST_TOKEN        = process.env.INGEST_TOKEN;
 const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
 const MAX_BUF_BYTES       = parseInt(process.env.MAX_BUF_BYTES || String(2 * 1024 * 1024), 10);  // 2 MB
 
-if (!INGEST_TOKEN) {
-  console.error('[ingest] INGEST_TOKEN env var not set — refusing to start unauthenticated on a public port.');
-  process.exit(1);
-}
+// Token check dipindah ke blok startup (require.main) supaya file ini bisa di-require
+// oleh test (mis. test-transcode.js pakai ffmpegArgs) tanpa exit / tanpa listen.
 
 // device_id -> { proc, buf, killTimer }
 const sessions = new Map();
@@ -42,15 +40,20 @@ function ffmpegArgs(deviceId) {
   const base = [
     // Stempel tiap frame dgn waktu kedatangan nyata — ESP kirim fps variabel (adaptive),
     // JADI JANGAN pakai -framerate yg mengasumsikan input konstan (bikin PTS meleset →
-    // speed<1x → WebRTC underrun/"loading").
+    // speed<1x → underrun/"loading").
     '-use_wallclock_as_timestamps', '1',
     '-f', 'mjpeg', '-i', 'pipe:0',
+    // yuv420p WAJIB: sumber JPEG OV2640 = yuvj422p (4:2:2). H264 4:2:2 lebih berat
+    // di-encode & tak ramah decoder browser. Paksa 4:2:0.
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    // Output CFR: duplikat frame saat input lambat → 15fps mulus, PTS = real-time.
+    '-pix_fmt', 'yuv420p',
+    // Output CFR: duplikat frame saat input lambat → cadence mulus, PTS = real-time.
     '-fps_mode', 'cfr', '-r', fps,
+    // Keyframe reguler tiap 2 dtk supaya segmen HLS (hlsSegmentDuration 2s) rata.
+    // -g = fps*2, plus paksa IDR tepat di kelipatan 2 dtk.
     '-g', String(parseInt(fps) * 2),
-    '-b:v', '800k', '-bufsize', '800k',
-    '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
+    '-force_key_frames', 'expr:gte(t,n_forced*2)',
+    '-b:v', '1200k', '-bufsize', '1200k',
     '-an',
   ];
   if (process.env.TEST_MODE === '1') {
@@ -159,6 +162,17 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[ingest] listening on :${PORT} -> mediamtx at ${MEDIAMTX_HOST}:${MEDIAMTX_PORT} (reconnect window ${RECONNECT_WINDOW_MS / 1000}s)`);
-});
+// Startup hanya saat dijalankan langsung (node server.js), bukan saat di-require test.
+if (require.main === module) {
+  if (!INGEST_TOKEN) {
+    console.error('[ingest] INGEST_TOKEN env var not set — refusing to start unauthenticated on a public port.');
+    process.exit(1);
+  }
+  server.listen(PORT, () => {
+    console.log(`[ingest] listening on :${PORT} -> mediamtx at ${MEDIAMTX_HOST}:${MEDIAMTX_PORT} (reconnect window ${RECONNECT_WINDOW_MS / 1000}s)`);
+  });
+}
+
+// Diekspor supaya test memakai args ffmpeg yang SAMA PERSIS dengan production
+// (single source of truth — cegah drift seperti sebelumnya).
+module.exports = { ffmpegArgs };

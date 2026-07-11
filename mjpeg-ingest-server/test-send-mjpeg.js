@@ -18,7 +18,7 @@ const get   = (flag, def) => { const i = args.indexOf(flag); return i !== -1 ? a
 
 const HOST       = get('--host',   'localhost');
 const PORT       = parseInt(get('--port',   '8080'), 10);
-const FPS        = parseInt(get('--fps',    '15'),   10);
+const FPS        = parseInt(get('--fps',    '25'),   10);
 const DEVICE     = get('--device', 'feeder-1');
 const TOKEN      = get('--token',  process.env.INGEST_TOKEN || 'test-token');
 const FRAMES_DIR = get('--frames', '');

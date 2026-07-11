@@ -102,7 +102,7 @@ services:
       MEDIAMTX_USER: purrtein        # RTSP tetap kirim WWW-Authenticate: Basic
                                       # walau IP sudah di-whitelist -- perlu
                                       # kredensial buat jawab challenge-nya.
-      STREAM_FPS: "15"               # harus match STREAM_FPS di firmware config.h
+      STREAM_FPS: "25"               # harus match STREAM_FPS di firmware config.h
     ports:
       - "8080:8080"                  # ESP32 push ke sini
     depends_on:

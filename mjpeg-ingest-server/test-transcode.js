@@ -18,8 +18,14 @@ const argv      = process.argv.slice(2);
 const get       = (f, d) => { const i = argv.indexOf(f); return i !== -1 ? argv[i+1] : d; };
 const FRAMES_DIR = get('--frames-dir', '');
 const COUNT      = parseInt(get('--count', '60'), 10);
-const FPS        = parseInt(get('--fps',   '15'), 10);
+const FPS        = parseInt(get('--fps',   '25'), 10);
 const INTERVAL   = Math.round(1000 / FPS);
+
+// Args ffmpeg diambil dari production (server.js) via TEST_MODE → tidak ada duplikasi
+// yang bisa drift. STREAM_FPS & TEST_MODE dibaca ffmpegArgs saat dipanggil.
+process.env.TEST_MODE  = '1';
+process.env.STREAM_FPS = String(FPS);
+const { ffmpegArgs } = require('./server');
 
 // ── load frames ───────────────────────────────────────────────────────────────
 
@@ -77,18 +83,11 @@ if (badFrames > 0) {
 console.log(`[transcode-test] all ${frames.length} frames pass SOI/EOI check`);
 console.log(`[transcode-test] piping to ffmpeg at ${FPS}fps...\n`);
 
-// ── spawn ffmpeg (args identik dengan production) ─────────────────────────────
+// ── spawn ffmpeg (args identik dengan production, TEST_MODE → -f null -) ───────
 
-const ffmpeg = spawn('ffmpeg', [
-  '-f', 'mjpeg', '-framerate', String(FPS), '-i', 'pipe:0',
-  '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-  '-r', String(FPS),
-  '-g', String(FPS * 2),
-  '-b:v', '800k', '-bufsize', '800k',
-  '-fflags', '+nobuffer', '-flags', 'low_delay', '-max_delay', '0',
-  '-an',
-  '-f', 'null', '-',
-]);
+const args = ffmpegArgs('transcode-test');
+console.log(`[transcode-test] ffmpeg args: ${args.join(' ')}\n`);
+const ffmpeg = spawn('ffmpeg', args);
 
 let errors = 0;
 

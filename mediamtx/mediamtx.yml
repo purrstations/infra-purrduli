@@ -8,6 +8,13 @@ rtspAddress: :8554
 
 hls: yes
 hlsAddress: :8888
+# HLS klasik berbuffer (BUKAN lowLatency default). Sumber ESP32 jitter -- send_ms
+# sesekali melonjak ~1.5s (WiFi) -> butuh buffer player yg menyerap gap itu supaya
+# tidak patah-patah. Latency HLS ~ 3 x hlsSegmentDuration (player buffer 3 segmen),
+# jadi 2s -> ~6s delay. Naikkan segmen ke 3s kalau mau ~9-10s.
+hlsVariant: fmp4
+hlsSegmentDuration: 2s
+hlsSegmentCount: 7
 
 webrtc: yes
 webrtcAddress: :8889
