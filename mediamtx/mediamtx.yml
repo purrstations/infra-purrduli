@@ -8,15 +8,10 @@ rtspAddress: :8554
 
 hls: yes
 hlsAddress: :8888
-# HLS klasik berbuffer (BUKAN lowLatency default). Sumber ESP32 jitter -- send_ms
-# sesekali melonjak ~1.5s (WiFi) -> butuh buffer player yg menyerap gap itu supaya
-# tidak patah-patah. Latency HLS ~ 3 x hlsSegmentDuration (player buffer 3 segmen),
-# jadi 3s -> ~9s delay. Untuk mengubah buffer, ubah hlsSegmentDuration DI SINI dan
-# SELARASKAN keyframe interval di mjpeg-ingest-server/server.js (-g = fps*N,
-# force_key_frames n_forced*N) supaya segmen tetap rata.
-hlsVariant: fmp4
-hlsSegmentDuration: 3s
-hlsSegmentCount: 7
+# Buffering HLS klasik (fmp4 + segmen 3s x 7 = ~9-21s buffer) sudah DIBUANG:
+# terbukti tidak menyembuhkan patah-patah karena akarnya starvation bandwidth
+# (uplink MiFi ~1.64 Mbps < VGA@25fps), bukan jitter — buffer cuma nambah delay.
+# Balik ke default mediamtx (lowLatency) supaya latency rendah tanpa buffer sia-sia.
 
 webrtc: yes
 webrtcAddress: :8889
