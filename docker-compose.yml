@@ -28,9 +28,8 @@ services:
     # Biarkan VITE_API_URL/VITE_WS_URL kosong di .env → app pakai path relatif (same-origin).
     build:
       context: ../web
+      # VITE_API_URL/VITE_WS_URL sengaja TIDAK dikirim → biar undefined → api.ts default "/api/v1"
       args:
-        VITE_API_URL: ${VITE_API_URL:-}
-        VITE_WS_URL: ${VITE_WS_URL:-}
         VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
         VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
         VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
