@@ -21,11 +21,16 @@ services:
     networks:
       - internal
 
-  # frontend:
-  #   image: ghcr.io/purrtein/frontend:latest
-  #   restart: unless-stopped
-  #   networks:
-  #     - internal
+  frontend:
+    # TanStack Start SSR (node-server). Repo web harus ada di /app/web (sibling infra).
+    # Dockerfile-nya override NITRO_PRESET=node-server → server Node di :3000.
+    build: ../web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    networks:
+      - internal
 
   postgres:
     image: postgres:16-alpine
