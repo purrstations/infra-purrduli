@@ -24,7 +24,20 @@ services:
   frontend:
     # TanStack Start SSR (node-server). Repo web harus ada di /app/web (sibling infra).
     # Dockerfile-nya override NITRO_PRESET=node-server → server Node di :3000.
-    build: ../web
+    # VITE_* dibaca dari .env → diteruskan sebagai build arg (Vite = build-time).
+    # Biarkan VITE_API_URL/VITE_WS_URL kosong di .env → app pakai path relatif (same-origin).
+    build:
+      context: ../web
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_WS_URL: ${VITE_WS_URL:-}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET:-}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_FIREBASE_VAPID_KEY: ${VITE_FIREBASE_VAPID_KEY:-}
     restart: unless-stopped
     environment:
       NODE_ENV: production
