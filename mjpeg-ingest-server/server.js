@@ -37,6 +37,11 @@ function mediamtxUrl(deviceId) {
 
 function ffmpegArgs(deviceId) {
   const fps  = process.env.STREAM_FPS || '15';
+  // Orientasi kamera. OV2640 tak bisa rotate 90° di hardware (cuma hflip/vflip), jadi
+  // rotasi dilakukan di sini saat transcode. transpose: 1=90°CW, 2=90°CCW, 0/3=+flip.
+  // ponytail: knob orientasi mount fisik — set STREAM_TRANSPOSE=off kalau kamera tegak.
+  const transpose = process.env.STREAM_TRANSPOSE || '1';
+  const rotate = transpose === 'off' ? [] : ['-vf', `transpose=${transpose}`];
   const base = [
     // Stempel tiap frame dgn waktu kedatangan nyata — ESP kirim fps variabel (adaptive),
     // JADI JANGAN pakai -framerate yg mengasumsikan input konstan (bikin PTS meleset →
@@ -46,6 +51,7 @@ function ffmpegArgs(deviceId) {
     // yuv420p WAJIB: sumber JPEG OV2640 = yuvj422p (4:2:2). H264 4:2:2 lebih berat
     // di-encode & tak ramah decoder browser. Paksa 4:2:0.
     '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+    ...rotate,
     '-pix_fmt', 'yuv420p',
     // Output CFR: duplikat frame saat input lambat → cadence mulus, PTS = real-time.
     '-fps_mode', 'cfr', '-r', fps,
