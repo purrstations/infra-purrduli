@@ -44,6 +44,17 @@ services:
     networks:
       - internal
 
+  dashboard:
+    # TanStack Start SSR (admin dashboard). Repo di /app/admin (sibling infra).
+    # VITE_API_URL di-set di Dockerfile (=/api/v1) → same-origin via nginx admin.purrduli.tech.
+    build: ../admin
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    networks:
+      - internal
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
