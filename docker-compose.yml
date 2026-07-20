@@ -98,6 +98,38 @@ services:
     networks:
       - internal
 
+  # Adminer — web UI buat Postgres (edit tabel/jalanin query). Bind loopback VPS
+  # saja (TIDAK publik), sama pola dgn postgres/redis. Akses dari laptop:
+  #   ssh -L 8081:localhost:8081 user@145.79.10.86  → buka http://localhost:8081
+  # Login: System=PostgreSQL, Server=postgres, user/pass/db dari .env.
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres   # pre-fill kolom Server di form login
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      - postgres
+    networks:
+      - internal
+
+  # redis-commander — web UI buat Redis (lihat/edit key, cek job BullMQ). Loopback
+  # only. Akses dari laptop:
+  #   ssh -L 8082:localhost:8082 user@145.79.10.86  → buka http://localhost:8082
+  # Redis tanpa password (lihat `command:` di service redis), jadi cukup host:port.
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "127.0.0.1:8082:8081"
+    depends_on:
+      - redis
+    networks:
+      - internal
+
   mqtt:
     image: emqx/emqx:latest
     restart: unless-stopped
