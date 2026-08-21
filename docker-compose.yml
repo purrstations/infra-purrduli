@@ -153,7 +153,7 @@ services:
       - internal
 
   mediamtx:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx:latest-ffmpeg
     restart: unless-stopped
     env_file: .env
     environment:
@@ -168,8 +168,8 @@ services:
     networks:
       - internal
 
-  mjpeg-ingest:
-    build: ./mjpeg-ingest-server
+  h264-ingest:
+    build: ./h264-ingest-server
     restart: unless-stopped
     env_file: .env
     environment:
@@ -178,9 +178,8 @@ services:
       MEDIAMTX_USER: purrtein        # RTSP tetap kirim WWW-Authenticate: Basic
                                       # walau IP sudah di-whitelist -- perlu
                                       # kredensial buat jawab challenge-nya.
-      STREAM_FPS: "25"               # harus match STREAM_FPS di firmware config.h
     ports:
-      - "8080:8080"                  # ESP32 push ke sini
+      - "8080:8080"                  # ESP32-P4 push H.264 ke sini
     depends_on:
       - mediamtx
     networks:

@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "node .claude/hooks/session-start.js"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "node .claude/hooks/stop.js"
+      }
+    ]
+  },
+  "mcpServers": {
+    "hostinger-hosting": {
+      "command": "npx.cmd",
+      "args": ["--package=hostinger-api-mcp@latest", "hostinger-hosting-mcp"],
+      "env": { "HOSTINGER_API_TOKEN": "KWdNCXrP5KMPeAwN9tGOV2zLz7IJDTcWjasHRmcma530d7f8" }
+    },
+    "hostinger-domains": {
+      "command": "npx.cmd",
+      "args": ["--package=hostinger-api-mcp@latest", "hostinger-domains-mcp"],
+      "env": { "HOSTINGER_API_TOKEN": "KWdNCXrP5KMPeAwN9tGOV2zLz7IJDTcWjasHRmcma530d7f8" }
+    },
+    "hostinger-dns": {
+      "command": "npx.cmd",
+      "args": ["--package=hostinger-api-mcp@latest", "hostinger-dns-mcp"],
+      "env": { "HOSTINGER_API_TOKEN": "KWdNCXrP5KMPeAwN9tGOV2zLz7IJDTcWjasHRmcma530d7f8" }
+    },
+    "hostinger-vps": {
+      "command": "npx.cmd",
+      "args": ["--package=hostinger-api-mcp@latest", "hostinger-vps-mcp"],
+      "env": { "HOSTINGER_API_TOKEN": "KWdNCXrP5KMPeAwN9tGOV2zLz7IJDTcWjasHRmcma530d7f8" }
+    }
+  }
+}
