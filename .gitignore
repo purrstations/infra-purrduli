@@ -1,4 +1,4 @@
 .env
 certbot/conf/
 certbot/www/
-.claude/
+.claude/settings.local.json
