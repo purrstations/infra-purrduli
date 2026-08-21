@@ -1,5 +1,15 @@
 logLevel: debug
 
+# Default mediamtx (10s) LEBIH PENDEK dari reconnect window device (firmware
+# STREAM_RECONNECT_WINDOW_MS) & h264-ingest-server (RECONNECT_WINDOW_MS), yang
+# dua-duanya 15s dan sengaja dibikin toleran ke TCP drop sesaat (WiFi glitch).
+# Kalau mediamtx nutup publisher RTSP duluan di detik ke-10, ffmpeg yang lagi
+# nunggu resume (masih hidup di ingest-server) nabrak "Broken pipe" pas device
+# akhirnya reconnect — device sendiri gak pernah tau (dia cuma ngomong ke ingest-
+# server, bukan mediamtx), jadi keliatan "device online tapi stream mati sendiri".
+# Naikin ke 20s: lebih longgar dari 15s reconnect window manapun di pipeline ini.
+readTimeout: 20s
+writeTimeout: 20s
 api: yes
 apiAddress: :9997
 
@@ -17,7 +27,7 @@ webrtcICEUDPMuxAddress: :8189
 authMethod: internal
 authInternalUsers:
   # Publish diizinkan berdasarkan IP docker network internal, bukan
-  # username/password -- ffmpeg (mjpeg-ingest-server) berulang kali kena
+  # username/password -- ffmpeg (h264-ingest-server) berulang kali kena
   # 401 di ANNOUNCE meski kredensial sudah benar & rtspAuthMethods default
   # basic; ini keterbatasan/quirk RTSP output-muxer ffmpeg, bukan salah
   # config mediamtx. IP-based auth sidestep masalah itu karena gak perlu
