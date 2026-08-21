@@ -77,7 +77,7 @@ services:
       - internal
 
   mediamtx:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx:latest-ffmpeg
     restart: unless-stopped
     env_file: .env
     environment:
