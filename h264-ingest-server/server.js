@@ -42,17 +42,57 @@ function mediamtxUrl(deviceId) {
   return `rtsp://${auth}${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${deviceId}`;
 }
 
+// Timestamp strategy (fix stutter 2026-08):
+// Default produksi = input `-r 25` TANPA wallclock flag. Alasan:
+//  - Device (ESP32-P4) mengulang SPS+PPS tiap GOP, dan SPS-nya bikin parser
+//    h264 ffmpeg menurunkan "25 fps, 50 tbr". `-r 25` memaksa dts frame-count
+//    monolitik @25fps dari paket pertama, mengabaikan tebakan parser.
+//  - `-use_wallclock_as_timestamps 1` (argv produksi lama) justru MEMPERPARAH:
+//    mencampur stamping wallclock (epoch besar) dengan dts parser (frame-count
+//    kecil) → muxer melihat DTS mundur dan menulis-ulang ratusan kali per
+//    sesi (579x dalam 14 menit di produksi 2026-08) → stutter/jump di WebRTC.
+//    Bukti: test-transcode.js — non-monotonic 460 (wallclock) vs 0 (fix).
+//  - Paket pertama tetap NOPTS (1x warning per sesi, sebelum parser init) —
+//    benign, frame pertama saja.
+// Catatan: fps input yang real < 25 (AIMD degraded) → playback terkompresi
+// rata, TANPA loncatan. Perbaikan fps dilakukan device-side (Fase B).
+//
+// TS_MODE (env, khusus testing/rollback):
+//   wallclock : argv produksi lama (repro bug)
+//   genpts / r25 / copyts / baseline : variasi matriks (baseline = tanpa apa pun)
+//   kombinasi dgn '+', mis. TS_MODE=baseline+genpts
+function timestampArgs(mode) {
+  if (!mode) {
+    return ['-r', '25', '||'];
+  }
+  const parts  = mode.split('+');
+  const before = [];  // input options (sebelum -i)
+  const after  = [];  // output options (setelah -i)
+  for (const p of parts) {
+    if (p === 'wallclock') before.push('-use_wallclock_as_timestamps', '1');
+    if (p === 'genpts')    before.push('-fflags', '+genpts');
+    if (p === 'r25')       before.push('-r', '25');
+    if (p === 'copyts')    after.push('-copyts');
+  }
+  return [...before, '||', ...after];
+}
+
 function ffmpegArgs(deviceId) {
+  const ts   = timestampArgs(process.env.TS_MODE);
+  const sep  = ts.indexOf('||');
+  const pre  = ts.slice(0, sep);
+  const post = ts.slice(sep + 1);
   const base = [
-    // ESP diharapkan kirim H.264 Annex-B mentah dgn fps adaptif — rencana: device-
-    // side AIMD lewat H264BitrateController (src/core/h264_bitrate_controller.h di
-    // repo iot). Wallclock timestamp tetap perlu supaya PTS gak drift walau fps input berubah.
-    '-use_wallclock_as_timestamps', '1',
+    // ESP diharapkan kirim H.264 Annex-B mentah dgn fps adaptif — AIMD device-side
+    // lewat H264BitrateController (src/core/h264_bitrate_controller.h di repo iot).
+    // Input options (mis. -r 25) datang dari timestampArgs() di atas.
+    ...pre,
     '-f', 'h264', '-i', 'pipe:0',
     // Remux, bukan transcode — device sudah encode H.264 di hardware (ESP32-P4).
     // -c:v copy = pass-through NAL units apa adanya.
     '-c:v', 'copy',
     '-an',
+    ...post,
   ];
   if (process.env.TEST_MODE === '1') {
     // Validate H264 remux without pushing anywhere. ffmpeg stderr shows errors.
