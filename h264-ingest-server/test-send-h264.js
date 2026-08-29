@@ -24,9 +24,6 @@ const TOKEN       = get('--token',  process.env.INGEST_TOKEN || 'test-token');
 const H264_FILE   = get('--h264-file', '');
 const CHUNK_BYTES = parseInt(get('--chunk-bytes', '4096'), 10);
 const CHUNK_MS    = parseInt(get('--chunk-ms', '20'), 10);
-// Simulasi stall uplink: tiap --pause-every-ms, diam selama --pause-ms.
-const PAUSE_EVERY = parseInt(get('--pause-every-ms', '0'), 10);
-const PAUSE_LEN   = parseInt(get('--pause-ms', '0'), 10);
 
 // ── load / generate H.264 Annex-B ───────────────────────────────────────────
 let h264;
@@ -81,10 +78,6 @@ let sent   = 0;
 const t0   = Date.now();
 
 const timer = setInterval(() => {
-  const nowMs = Date.now() - t0;
-  if (PAUSE_EVERY > 0 && (nowMs % PAUSE_EVERY) > (PAUSE_EVERY - PAUSE_LEN)) {
-    return;  // sedang "stall" — tidak ada byte keluar
-  }
   const end   = Math.min(offset + CHUNK_BYTES, h264.length);
   const chunk = h264.subarray(offset, end);
   req.write(chunk);
