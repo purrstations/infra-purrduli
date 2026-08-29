@@ -13,6 +13,7 @@
 
 const http = require('http');
 const { spawn } = require('child_process');
+const { AuParser } = require('./au-framing');
 
 const PORT                = parseInt(process.env.INGEST_PORT || '8080', 10);
 const MEDIAMTX_HOST       = process.env.MEDIAMTX_HOST || '127.0.0.1';
@@ -21,6 +22,19 @@ const MEDIAMTX_USER       = process.env.MEDIAMTX_USER || '';
 const MEDIAMTX_PASS       = process.env.MEDIAMTX_PASS || '';
 const INGEST_TOKEN        = process.env.INGEST_TOKEN;
 const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
+
+// Pacer (Fase C-lite): keluarkan AU ke ffmpeg dengan tempo tetap, BUKAN
+// mengikuti kedatangan. Alasan: ffmpeg men-stamp dengan -r 25 (timeline CFR
+// 25fps), jadi player mengonsumsi 25fps TANPA henti — kalau device menghasilkan
+// <25fps atau byte nyembur (jitter MiFi), buffer player kering = spinner.
+// Pacer menjamin pasokan tepat 25/s:
+//   - queue berisi  → keluarkan AU berikutnya (burst diserap, halus)
+//   - queue kosong  → ulangi AU terakhir (frame repeat; decoder menampilkan
+//     gambar sama — freeze sesaat, BUKAN kelaparan buffer / loncatan)
+//   - queue meluap  → buang yang tertua (batas latency, loncatan kecil)
+const PACER_INTERVAL_MS  = parseInt(process.env.PACER_INTERVAL_MS || '40', 10);   // 25fps, match -r 25
+const PACER_MAX_QUEUE    = parseInt(process.env.PACER_MAX_QUEUE || '10', 10);     // 400ms
+const PACER_TARGET_QUEUE = parseInt(process.env.PACER_TARGET_QUEUE || '5', 10);
 
 // device_id di sini HARUS match path regex mediamtx.yml ("~^feeder-[0-9]+$") —
 // kalau lebih longgar, ID bisa lolos ingest tapi gak ke-route ke mediamtx (path
@@ -32,7 +46,8 @@ if (require.main === module && !INGEST_TOKEN) {
   process.exit(1);
 }
 
-// device_id -> { proc, killTimer, activeReq }
+// device_id -> { proc, killTimer, activeReq, parser, auQueue, lastAu,
+//                stdinDrained, pacer }
 // activeReq = request HTTP yang sedang "memiliki" stdin ffmpeg ini — dipakai
 // untuk menolak koneksi kedua yang overlap (lihat blok createServer di bawah).
 const sessions = new Map();
@@ -40,6 +55,50 @@ const sessions = new Map();
 function mediamtxUrl(deviceId) {
   const auth = MEDIAMTX_USER ? `${MEDIAMTX_USER}:${MEDIAMTX_PASS}@` : '';
   return `rtsp://${auth}${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${deviceId}`;
+}
+
+// Tulis 1 AU ke stdin ffmpeg dengan backpressure-aware. Return true kalau
+// pacer boleh lanjut tick berikutnya.
+function pacerWrite(session, au) {
+  const stdin = session.proc.stdin;
+  if (!stdin || !stdin.writable) return false;
+  const ok = stdin.write(au);
+  if (!ok) {
+    // Backpressure: ffmpeg/RTSP lebih lambat — tunggu drain sebelum tick lagi.
+    stdin.once('drain', () => { session.stdinDrained = true; });
+    return false;
+  }
+  return true;
+}
+
+function startPacer(session, deviceId) {
+  session.stdinDrained = true;
+  const timer = setInterval(() => {
+    if (session.stdinDrained === false) return;
+
+    let au;
+    if (session.auQueue.length > 0) {
+      // Buang surplus — batas latency (loncatan kecil, bukan kelaparan).
+      while (session.auQueue.length > PACER_MAX_QUEUE) session.auQueue.shift();
+      au = session.auQueue.shift();
+      session.lastAu = au;
+    } else {
+      au = session.lastAu;  // frame repeat — jaga pasokan 25fps
+      if (!au) return;      // belum ada AU sama sekali (awal stream)
+    }
+    pacerWrite(session, au);
+  }, PACER_INTERVAL_MS);
+  if (timer.unref) timer.unref();
+  return timer;
+}
+
+// Clean stop: flush seluruh queue tanpa pacing, lalu tutup stdin.
+function stopPacerAndFlush(session) {
+  if (session.pacer) { clearInterval(session.pacer); session.pacer = null; }
+  const stdin = session.proc.stdin;
+  if (!stdin || !stdin.writable) return;
+  for (const au of session.auQueue) stdin.write(au);
+  session.auQueue = [];
 }
 
 // Timestamp strategy (fix stutter 2026-08):
@@ -112,7 +171,10 @@ function startFfmpeg(deviceId) {
   proc.on('exit', (code) => {
     console.log(`[ingest] ffmpeg for ${deviceId} exited (code=${code})`);
     const s = sessions.get(deviceId);
-    if (s && s.proc === proc) sessions.delete(deviceId);
+    if (s && s.proc === proc) {
+      if (s.pacer) { clearInterval(s.pacer); s.pacer = null; }
+      sessions.delete(deviceId);
+    }
   });
   proc.on('error', (err) => {
     console.error(`[ingest] ffmpeg for ${deviceId} failed to start: ${err.message}`);
@@ -139,7 +201,17 @@ const server = http.createServer((req, res) => {
 
   let session = sessions.get(deviceId);
   if (!session) {
-    session = { proc: startFfmpeg(deviceId), killTimer: null, activeReq: null };
+    session = {
+      proc: startFfmpeg(deviceId),
+      killTimer: null,
+      activeReq: null,
+      parser: new AuParser(),
+      auQueue: [],
+      lastAu: null,
+      stdinDrained: true,
+      pacer: null,
+    };
+    session.pacer = startPacer(session, deviceId);
     sessions.set(deviceId, session);
   } else if (session.activeReq) {
     // Koneksi lain untuk device_id yang sama masih aktif nulis ke stdin ffmpeg
@@ -173,16 +245,13 @@ const server = http.createServer((req, res) => {
 
   req.on('data', (chunk) => {
     if (process.env.DEBUG_FRAMES === '1') {
-      console.log(`[chunk ${deviceId}] ${chunk.length}B`);
+      console.log(`[chunk ${deviceId}] ${chunk.length}B queue=${session.auQueue.length}`);
     }
-    if (!myProc.stdin.writable) return;
-    const ok = myProc.stdin.write(chunk);
-    if (!ok) {
-      // Backpressure: ffmpeg (atau RTSP output-nya ke mediamtx) lebih lambat
-      // dari input — jeda req sampai stdin ffmpeg siap nerima lagi, supaya Node
-      // gak numpuk buffer chunk di memori tanpa batas.
-      req.pause();
-      myProc.stdin.once('drain', () => req.resume());
+    // Fase C-lite: byte stream di-parse jadi AU, lalu masuk queue pacer —
+    // BUKAN langsung ke stdin ffmpeg. Pacer yang menulis dengan tempo 25fps
+    // (frame repeat saat pasokan kurang) supaya player tidak kelaparan.
+    for (const au of session.parser.feed(chunk)) {
+      session.auQueue.push(au);
     }
   });
 
@@ -194,6 +263,9 @@ const server = http.createServer((req, res) => {
     const s = sessions.get(deviceId);
     if (s && s.proc === myProc) {
       if (s.killTimer) clearTimeout(s.killTimer);
+      // Flush sisa AU (termasuk NAL berjalan) ke ffmpeg sebelum menutup stdin.
+      for (const au of s.parser.finish()) s.auQueue.push(au);
+      stopPacerAndFlush(s);
       myProc.stdin.end();
       sessions.delete(deviceId);
     }
