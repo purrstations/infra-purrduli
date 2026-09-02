@@ -43,27 +43,24 @@
       return;
     }
     if (!window.Hls || !Hls.isSupported()) return;
-    // LL-HLS — latency target ~1-2s (setara player bawaan MediaMTX),
-    // JANGAN dinaikkan maxBufferLength (delay = buffer).
-    const hls = new Hls({
-      lowLatencyMode: true,
-      enableWorker: true,
-      liveSyncDurationCount: 3,
-      maxBufferLength: 6,
-      backBufferLength: 15,
+    // Config = persis player bawaan MediaMTX (latency & sinkronitas identik):
+    // maxLiveSyncPlaybackRate = kunci sinkron — playback yang tertinggal dari
+    // live edge dikejar sampai 1.5x. Sisanya default hls.js (lowLatencyMode
+    // true, liveSyncDurationCount 3 → target latency sama dgn player lama).
+    const hls = new Hls({ maxLiveSyncPlaybackRate: 1.5 });
+    hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(src));
+    hls.on(Hls.Events.MANIFEST_LOADED, () => {
+      video.play().catch(() => {});
     });
-    hls.loadSource(src);
-    hls.attachMedia(video);
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        // Feeder offline / segment bolong — coba lagi otomatis, tanpa UI.
-        setTimeout(() => hls.startLoad(), 3000);
-      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-        hls.recoverMediaError();
-      }
+      // Pola player bawaan MediaMTX: destroy + rebuild penuh setelah 2s.
+      hls.destroy();
+      setTimeout(start, 2000);
     });
-    if (window.Hls) hls.startLoad(-1);
+    // Balik ke titik live setelah tab sempat di-minimize/di-pause.
+    video.onplay = () => { video.currentTime = hls.liveSyncPosition; };
+    hls.attachMedia(video);
   };
 
   if (window.Hls) start();
