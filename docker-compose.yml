@@ -178,6 +178,8 @@ services:
       MEDIAMTX_USER: purrtein        # RTSP tetap kirim WWW-Authenticate: Basic
                                       # walau IP sudah di-whitelist -- perlu
                                       # kredensial buat jawab challenge-nya.
+      DISABLE_AUTH: ${DISABLE_AUTH:-0}   # LOCAL TEST ONLY: set DISABLE_AUTH=1 (shell env) untuk bypass token check; default 0 = aman.
+      TS_MODE: ${TS_MODE:-r20}            # LOCAL TEST: stamp input fps=r20 (match device real ~20fps). Default server behavior is 25.
     ports:
       - "8080:8080"                  # ESP32-P4 push H.264 ke sini
     depends_on:
@@ -193,6 +195,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/web:/var/www/rotate:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     networks:
