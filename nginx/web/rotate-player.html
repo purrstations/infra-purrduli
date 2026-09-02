@@ -26,9 +26,9 @@
   // Device code dari path: /rotate/feeder-1/ -> feeder-1
   const m = location.pathname.match(/feeder-[0-9]+/);
   if (!m) return;
-  const src = `${location.origin}/${m[0]}/index.m3u8`;
+  const code = m[0];
 
-  // Video landscape (4:3) di-rotate 90deg -> mengisi layar: width elemen =
+  // Video landscape (4:3) di-rotate 90deg -> menempati layar: width elemen =
   // tinggi layar, height elemen = lebar layar.
   const fit = () => {
     video.style.width  = stage.clientHeight + 'px';
@@ -37,37 +37,105 @@
   window.addEventListener('resize', fit);
   fit();
 
-  const start = () => {
+  // =====================================================================
+  // Jalur 1: WHEP/WebRTC — latency ~0.3-0.8s (vs HLS ~3s).
+  // Endpoint: POST SDP offer ke /whep/<code>/whep (nginx -> mediamtx :8889).
+  // =====================================================================
+
+  let whepGaveUp = false;
+  let whepAttempt = 0;
+
+  const startWhep = async () => {
+    if (whepGaveUp) return;
+    const pc = new RTCPeerConnection();
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+
+    let done = false;
+    pc.ontrack = (ev) => {
+      if (done) return;
+      done = true;                       // media mengalir — WHEP sukses
+      video.srcObject = ev.streams[0];
+      video.play().catch(() => {});
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // ICE gathering butuh waktu — tunggu complete (public host candidate cepat).
+    await new Promise((res) => {
+      if (pc.iceGatheringState === 'complete') return res();
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') res();
+      });
+      setTimeout(res, 1500); // jangan menunggu selamanya
+    });
+
+    try {
+      const resp = await fetch(`/whep/${code}/whep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: pc.localDescription.sdp,
+      });
+      if (!resp.ok) throw new Error(`whep ${resp.status}`);
+      const answer = await resp.text();
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+    } catch (_) {
+      pc.close();
+      whepFallback();
+      return;
+    }
+
+    // Kalau 8s tidak sampai 'connected' (NAT/firewall UDP 8189 tertutup),
+    // serahkan ke HLS — jangan biarkan layar hitam selamanya.
+    setTimeout(() => {
+      if (!done && pc.connectionState !== 'connected') {
+        pc.close();
+        whepFallback();
+      }
+    }, 8000);
+  };
+
+  // =====================================================================
+  // Jalur 2 (fallback): HLS via hls.js — config = persis player bawaan
+  // MediaMTX (maxLiveSyncPlaybackRate = kunci sinkronitas).
+  // =====================================================================
+
+  const startHls = () => {
+    const src = `${location.origin}/${code}/index.m3u8`;
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src; // Safari: native HLS
       return;
     }
     if (!window.Hls || !Hls.isSupported()) return;
-    // Config = persis player bawaan MediaMTX (latency & sinkronitas identik):
-    // maxLiveSyncPlaybackRate = kunci sinkron — playback yang tertinggal dari
-    // live edge dikejar sampai 1.5x. Sisanya default hls.js (lowLatencyMode
-    // true, liveSyncDurationCount 3 → target latency sama dgn player lama).
     const hls = new Hls({ maxLiveSyncPlaybackRate: 1.5 });
     hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(src));
-    hls.on(Hls.Events.MANIFEST_LOADED, () => {
-      video.play().catch(() => {});
-    });
+    hls.on(Hls.Events.MANIFEST_LOADED, () => video.play().catch(() => {}));
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
-      // Pola player bawaan MediaMTX: destroy + rebuild penuh setelah 2s.
       hls.destroy();
-      setTimeout(start, 2000);
+      setTimeout(startHls, 2000);
     });
-    // Balik ke titik live setelah tab sempat di-minimize/di-pause.
     video.onplay = () => { video.currentTime = hls.liveSyncPosition; };
     hls.attachMedia(video);
   };
 
-  if (window.Hls) start();
+  // WHEP gagal 2x beruntun (mis. firewall UDP 8189 tertutup) → HLS permanen.
+  const whepFallback = () => {
+    if (++whepAttempt >= 2) { whepGaveUp = true; startHls(); }
+    else setTimeout(startWhep, 2000);
+  };
+
+  const boot = () => {
+    if (window.RTCPeerConnection) startWhep();
+    else startHls();
+  };
+
+  if (window.RTCPeerConnection) boot();
   else {
+    // Browser jadul tanpa WebRTC — tetap bisa via HLS.
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
-    s.onload = start;
+    s.onload = startHls;
     document.head.appendChild(s);
   }
 })();
