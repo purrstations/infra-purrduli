@@ -2,45 +2,34 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Purrtein Live</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #111; color: #eee;
-    font-family: system-ui, sans-serif; }
-  .wrap { display: flex; flex-direction: column; align-items: center;
-    justify-content: center; height: 100%; gap: 12px; padding: 8px;
-    box-sizing: border-box; }
-  /* Container portrait 3:4 — video landscape 4:3 di-rotate 90 CW di dalamnya */
-  .stage { position: relative; width: min(100%, 75vh); aspect-ratio: 3 / 4;
-    overflow: hidden; background: #000; border-radius: 8px; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  /* Full-bleed: tanpa border, tanpa teks, tanpa radius — murni video */
+  .stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
   .stage video { position: absolute; top: 50%; left: 50%;
     transform: translate(-50%, -50%) rotate(90deg); /* 90° searah jarum jam */
     object-fit: contain; background: #000; }
-  #status { font-size: 13px; color: #999; text-align: center; min-height: 18px; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="stage" id="stage">
-    <video id="video" autoplay muted playsinline></video>
-  </div>
-  <div id="status">memuat stream…</div>
+<div class="stage" id="stage">
+  <video id="video" autoplay muted playsinline></video>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
 <script>
 (() => {
-  const status = document.getElementById('status');
-  const video  = document.getElementById('video');
-  const stage  = document.getElementById('stage');
+  const video = document.getElementById('video');
+  const stage = document.getElementById('stage');
 
   // Device code dari path: /rotate/feeder-1/ -> feeder-1
   const m = location.pathname.match(/feeder-[0-9]+/);
-  if (!m) { status.textContent = 'URL tidak valid — device code tidak ditemukan.'; return; }
-  const code = m[0];
-  const src = `${location.origin}/${code}/index.m3u8`;
+  if (!m) return;
+  const src = `${location.origin}/${m[0]}/index.m3u8`;
 
-  // Video landscape (4:3) di-rotate 90deg -> menempati kotak portrait (3:4):
-  // width elemen = tinggi stage, height elemen = lebar stage.
+  // Video landscape (4:3) di-rotate 90deg -> mengisi layar: width elemen =
+  // tinggi layar, height elemen = lebar layar.
   const fit = () => {
     video.style.width  = stage.clientHeight + 'px';
     video.style.height = stage.clientWidth + 'px';
@@ -50,35 +39,37 @@
 
   const start = () => {
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Safari: native HLS
-      video.src = src;
+      video.src = src; // Safari: native HLS
       return;
     }
-    if (!window.Hls || !Hls.isSupported()) {
-      status.textContent = 'Browser tidak mendukung HLS.'; return;
-    }
-    const hls = new Hls({ maxBufferLength: 4, liveSyncDurationCount: 3 });
+    if (!window.Hls || !Hls.isSupported()) return;
+    // LL-HLS — latency target ~1-2s (setara player bawaan MediaMTX),
+    // JANGAN dinaikkan maxBufferLength (delay = buffer).
+    const hls = new Hls({
+      lowLatencyMode: true,
+      enableWorker: true,
+      liveSyncDurationCount: 3,
+      maxBufferLength: 6,
+      backBufferLength: 15,
+    });
     hls.loadSource(src);
     hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      status.textContent = '';
-      video.play().catch(() => { status.textContent = 'tap untuk play'; });
-    });
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) {
-        status.textContent = data.type === Hls.ErrorTypes.NETWORK_ERROR
-          ? 'Stream tidak tersedia — feeder mungkin sedang offline.'
-          : 'Gagal memutar stream — muat ulang halaman.';
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        // Feeder offline / segment bolong — coba lagi otomatis, tanpa UI.
+        setTimeout(() => hls.startLoad(), 3000);
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.recoverMediaError();
       }
     });
-    video.addEventListener('playing', () => { status.textContent = ''; });
+    if (window.Hls) hls.startLoad(-1);
   };
 
   if (window.Hls) start();
   else {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
-    s.onerror = () => { status.textContent = 'Gagal memuat player (CDN).'; };
     s.onload = start;
     document.head.appendChild(s);
   }
