@@ -20,7 +20,20 @@ const MEDIAMTX_PORT       = process.env.MEDIAMTX_RTSP_PORT || '8554';
 const MEDIAMTX_USER       = process.env.MEDIAMTX_USER || '';
 const MEDIAMTX_PASS       = process.env.MEDIAMTX_PASS || '';
 const INGEST_TOKEN        = process.env.INGEST_TOKEN;
+// LOCAL TEST ONLY: set DISABLE_AUTH=1 to skip the X-Ingest-Token check.
+// Never enable in production — the check is the only thing protecting the
+// public ingest port. Production compose must NOT set this.
+const DISABLE_AUTH        = process.env.DISABLE_AUTH === '1';
 const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
+// Takeover (fix 2026-09-02): koneksi baru boleh mengambil alih stdin ffmpeg
+// dari koneksi lama yang SUDAH ZOMBIE (device meninggalkannya). Firmware v3
+// stall-reconnect: write stall ≥3s → abort koneksi → buka baru <1s. RST abort
+// kadang terproses SETELAH koneksi baru datang → guard activeReq lama menolak
+// koneksi baru yang sah → ladder firmware habis → "no reconnect after 15s" →
+// stream mati. Zombie dideteksi dari freshness data: koneksi lama yang gak
+// ngirim ≥ ZOMBIE_IDLE_MS = sudah ditinggal device (by design stall ≥3s).
+// Duplikat beneran (dua penulis aktif) tetap di-reject.
+const ZOMBIE_IDLE_MS = parseInt(process.env.ZOMBIE_IDLE_MS || '2000', 10);
 
 // device_id di sini HARUS match path regex mediamtx.yml ("~^feeder-[0-9]+$") —
 // kalau lebih longgar, ID bisa lolos ingest tapi gak ke-route ke mediamtx (path
@@ -73,6 +86,8 @@ function timestampArgs(mode) {
     if (p === 'genpts')    before.push('-fflags', '+genpts');
     if (p === 'r25')       before.push('-r', '25');
     if (p === 'copyts')    after.push('-copyts');
+    const rm = /^r(\d+)$/.exec(p);   // generic r<fps>, e.g. r20 / r15 / r30
+    if (rm) before.push('-r', rm[1]);
   }
   return [...before, '||', ...after];
 }
@@ -132,29 +147,48 @@ const server = http.createServer((req, res) => {
     return;
   }
   const deviceId = match[1];
-  if (req.headers['x-ingest-token'] !== INGEST_TOKEN) {
+  const recvTok = req.headers['x-ingest-token'];
+  if (!DISABLE_AUTH && recvTok !== INGEST_TOKEN) {
+    // Length-only diag (no secret in logs) to confirm token mismatch at runtime.
+    console.error(`[ingest] token mismatch for ${deviceId}: recv_len=${String(recvTok || '').length} expected_len=${String(INGEST_TOKEN || '').length}`);
     res.writeHead(401).end('unauthorized');
     return;
   }
+  if (DISABLE_AUTH) console.warn(`[ingest] AUTH DISABLED via DISABLE_AUTH=1 (local test only)`);
 
   let session = sessions.get(deviceId);
   if (!session) {
-    session = { proc: startFfmpeg(deviceId), killTimer: null, activeReq: null };
+    session = { proc: startFfmpeg(deviceId), killTimer: null, activeReq: null, lastDataAt: 0 };
     sessions.set(deviceId, session);
   } else if (session.activeReq) {
-    // Koneksi lain untuk device_id yang sama masih aktif nulis ke stdin ffmpeg
-    // yang sama — jangan izinkan dua penulis sekaligus (NAL bakal interleaved
-    // jadi korup). Device yang reconnect-agresif/double-connect harus retry.
-    console.log(`[ingest] ${deviceId} rejected — another connection already streaming`);
-    res.writeHead(409).end('already streaming from another connection');
-    return;
+    const idleMs = Date.now() - (session.lastDataAt || 0);
+    if (idleMs < ZOMBIE_IDLE_MS) {
+      // Koneksi lama MASIH aktif nulis (data segar) — dua penulis sekaligus
+      // bakal bikin NAL interleaved/korup. Device reconnect-agresif harus retry.
+      console.log(`[ingest] ${deviceId} rejected — another connection actively streaming (idle ${idleMs}ms)`);
+      res.writeHead(409).end('already streaming from another connection');
+      return;
+    }
+    // Takeover: koneksi lama zombie (diam ≥ ZOMBIE_IDLE_MS — device v3 abort
+    // koneksi ber-stall lalu buka baru). Bunuh zombie-nya; stdin ffmpeg yang
+    // sama dilanjutkan koneksi baru (penulis mati = 0 byte, tanpa risiko
+    // interleaved). Device reconnect dgn encoder baru = mulai SPS+PPS+IDR,
+    // parser ffmpeg resync otomatis di start code.
+    console.log(`[ingest] ${deviceId} takeover — previous connection idle ${idleMs}ms`);
+    session.activeReq.isSuperseded = true;
+    session.activeReq.destroy();
+    if (session.killTimer) {
+      clearTimeout(session.killTimer);
+      session.killTimer = null;
+    }
   } else if (session.killTimer) {
-    // ESP32 reconnected before kill timer fired — resume the same ffmpeg session.
+    // ESP32 reconnected before kill timer fired - resume the same ffmpeg session.
     clearTimeout(session.killTimer);
     session.killTimer = null;
-    console.log(`[ingest] ${deviceId} reconnected — resuming ffmpeg`);
+    console.log(`[ingest] ${deviceId} reconnected - resuming ffmpeg`);
   }
   session.activeReq = req;
+  session.lastDataAt = Date.now();
   console.log(`[ingest] ${deviceId} connected from ${req.socket.remoteAddress}`);
 
   // Pegang referensi proc "milik" request ini secara langsung (bukan lewat
@@ -172,6 +206,8 @@ const server = http.createServer((req, res) => {
   myProc.once('exit', onProcExit);
 
   req.on('data', (chunk) => {
+    const s0 = sessions.get(deviceId);
+    if (s0) s0.lastDataAt = Date.now();
     if (process.env.DEBUG_FRAMES === '1') {
       console.log(`[chunk ${deviceId}] ${chunk.length}B`);
     }
@@ -203,6 +239,12 @@ const server = http.createServer((req, res) => {
   req.on('close', () => {
     myProc.removeListener('exit', onProcExit);
     if (endedClean) return;
+    if (req.isSuperseded) {
+      // Zombie yang dibunuh oleh takeover — JANGAN sentuh ownership session
+      // (activeReq sekarang milik koneksi baru; killTimer sudah di-clear).
+      console.log(`[ingest] ${deviceId} superseded connection closed`);
+      return;
+    }
     // TCP dropped (WiFi glitch, device reset) — keep ffmpeg alive so mediamtx
     // path stays up while ESP32 reconnects.
     console.log(`[ingest] ${deviceId} TCP dropped — keeping ffmpeg for ${RECONNECT_WINDOW_MS / 1000}s`);
