@@ -80,9 +80,9 @@ jobs:
                 docker compose restart mqtt
               fi
 
-              if echo "$CHANGED" | grep -q "^mjpeg-ingest-server/"; then
-                echo "==> Rebuild mjpeg-ingest..."
-                docker compose up -d --build mjpeg-ingest
+              if echo "$CHANGED" | grep -q "^h264-ingest-server/"; then
+                echo "==> Rebuild h264-ingest..."
+                docker compose up -d --build h264-ingest
               fi
 
               if echo "$CHANGED" | grep -q "^certbot/"; then

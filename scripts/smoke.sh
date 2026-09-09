@@ -83,8 +83,8 @@ info "mediamtx"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8889/ 2>/dev/null || echo 000)
 if [ "$CODE" != "000" ]; then ok "port WHEP :8889 merespons (HTTP $CODE)"; else bad "WHEP :8889 tak merespons"; fi
 
-# ── 6. mjpeg-ingest ──────────────────────────────────────────────────────
-info "mjpeg-ingest"
+# ── 6. h264-ingest ───────────────────────────────────────────────────────
+info "h264-ingest"
 # GET / → 404 (server hanya terima POST /ingest/<id>), tapi koneksi = port hidup
 ICODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8080/ 2>/dev/null || echo 000)
 if [ "$ICODE" != "000" ]; then ok "port :8080 terbuka (HTTP $ICODE)"; else bad ":8080 tak merespons"; fi

@@ -1,4 +1,6 @@
 .env
 certbot/conf/
 certbot/www/
-.claude/
+.claude/settings.local.json
+REVIEW-*.md
+sample.h264

@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+// H.264-over-HTTP ingest receiver.
+//
+// ESP32-P4 POST H.264 Annex-B (encode di hardware) chunked ke /ingest/<device_id>.
+// Annex-B self-delimiting lewat NAL start code (0x00 0x00 0x00 0x01) — beda dari
+// era MJPEG, di sini TIDAK ada framing per-frame yang perlu diparse: body request
+// di-pipe langsung ke stdin ffmpeg, yang remux (-c:v copy, bukan transcode) lalu
+// push RTSP ke mediamtx.
+//
+// Reconnect resilience: kalau TCP drop (bukan clean stream_stop), ffmpeg tetap
+// hidup di mediamtx selama RECONNECT_WINDOW_MS. Waktu ESP32 reconnect, lanjut
+// nulis ke ffmpeg yang sama — path mediamtx tidak hilang.
+
+const http = require('http');
+const { spawn } = require('child_process');
+
+const PORT                = parseInt(process.env.INGEST_PORT || '8080', 10);
+const MEDIAMTX_HOST       = process.env.MEDIAMTX_HOST || '127.0.0.1';
+const MEDIAMTX_PORT       = process.env.MEDIAMTX_RTSP_PORT || '8554';
+const MEDIAMTX_USER       = process.env.MEDIAMTX_USER || '';
+const MEDIAMTX_PASS       = process.env.MEDIAMTX_PASS || '';
+const INGEST_TOKEN        = process.env.INGEST_TOKEN;
+// LOCAL TEST ONLY: set DISABLE_AUTH=1 to skip the X-Ingest-Token check.
+// Never enable in production — the check is the only thing protecting the
+// public ingest port. Production compose must NOT set this.
+const DISABLE_AUTH        = process.env.DISABLE_AUTH === '1';
+const RECONNECT_WINDOW_MS = parseInt(process.env.RECONNECT_WINDOW_MS || '15000', 10);
+// Takeover (fix 2026-09-02): koneksi baru boleh mengambil alih stdin ffmpeg
+// dari koneksi lama yang SUDAH ZOMBIE (device meninggalkannya). Firmware v3
+// stall-reconnect: write stall ≥3s → abort koneksi → buka baru <1s. RST abort
+// kadang terproses SETELAH koneksi baru datang → guard activeReq lama menolak
+// koneksi baru yang sah → ladder firmware habis → "no reconnect after 15s" →
+// stream mati. Zombie dideteksi dari freshness data: koneksi lama yang gak
+// ngirim ≥ ZOMBIE_IDLE_MS = sudah ditinggal device (by design stall ≥3s).
+// Duplikat beneran (dua penulis aktif) tetap di-reject.
+const ZOMBIE_IDLE_MS = parseInt(process.env.ZOMBIE_IDLE_MS || '2000', 10);
+
+// device_id di sini HARUS match path regex mediamtx.yml ("~^feeder-[0-9]+$") —
+// kalau lebih longgar, ID bisa lolos ingest tapi gak ke-route ke mediamtx (path
+// kosong, silent). Kalau path mediamtx berubah, ganti regex ini juga.
+const DEVICE_ID_RE = /^\/ingest\/(feeder-[0-9]+)$/;
+
+if (require.main === module && !INGEST_TOKEN) {
+  console.error('[ingest] INGEST_TOKEN env var not set — refusing to start unauthenticated on a public port.');
+  process.exit(1);
+}
+
+// device_id -> { proc, killTimer, activeReq }
+// activeReq = request HTTP yang sedang "memiliki" stdin ffmpeg ini — dipakai
+// untuk menolak koneksi kedua yang overlap (lihat blok createServer di bawah).
+const sessions = new Map();
+
+function mediamtxUrl(deviceId) {
+  const auth = MEDIAMTX_USER ? `${MEDIAMTX_USER}:${MEDIAMTX_PASS}@` : '';
+  return `rtsp://${auth}${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${deviceId}`;
+}
+
+// Timestamp strategy (fix stutter 2026-08):
+// Default produksi = input `-r 25` TANPA wallclock flag. Alasan:
+//  - Device (ESP32-P4) mengulang SPS+PPS tiap GOP, dan SPS-nya bikin parser
+//    h264 ffmpeg menurunkan "25 fps, 50 tbr". `-r 25` memaksa dts frame-count
+//    monolitik @25fps dari paket pertama, mengabaikan tebakan parser.
+//  - `-use_wallclock_as_timestamps 1` (argv produksi lama) justru MEMPERPARAH:
+//    mencampur stamping wallclock (epoch besar) dengan dts parser (frame-count
+//    kecil) → muxer melihat DTS mundur dan menulis-ulang ratusan kali per
+//    sesi (579x dalam 14 menit di produksi 2026-08) → stutter/jump di WebRTC.
+//    Bukti: test-transcode.js — non-monotonic 460 (wallclock) vs 0 (fix).
+//  - Paket pertama tetap NOPTS (1x warning per sesi, sebelum parser init) —
+//    benign, frame pertama saja.
+// Catatan: fps input yang real < 25 (AIMD degraded) → playback terkompresi
+// rata, TANPA loncatan. Perbaikan fps dilakukan device-side (Fase B).
+//
+// TS_MODE (env, khusus testing/rollback):
+//   wallclock : argv produksi lama (repro bug)
+//   genpts / r25 / copyts / baseline : variasi matriks (baseline = tanpa apa pun)
+//   kombinasi dgn '+', mis. TS_MODE=baseline+genpts
+function timestampArgs(mode) {
+  if (!mode) {
+    return ['-r', '25', '||'];
+  }
+  const parts  = mode.split('+');
+  const before = [];  // input options (sebelum -i)
+  const after  = [];  // output options (setelah -i)
+  for (const p of parts) {
+    if (p === 'wallclock') before.push('-use_wallclock_as_timestamps', '1');
+    if (p === 'genpts')    before.push('-fflags', '+genpts');
+    if (p === 'r25')       before.push('-r', '25');
+    if (p === 'copyts')    after.push('-copyts');
+    const rm = /^r(\d+)$/.exec(p);   // generic r<fps>, e.g. r20 / r15 / r30
+    if (rm) before.push('-r', rm[1]);
+  }
+  return [...before, '||', ...after];
+}
+
+function ffmpegArgs(deviceId) {
+  const ts   = timestampArgs(process.env.TS_MODE);
+  const sep  = ts.indexOf('||');
+  const pre  = ts.slice(0, sep);
+  const post = ts.slice(sep + 1);
+  const base = [
+    // ESP diharapkan kirim H.264 Annex-B mentah dgn fps adaptif — AIMD device-side
+    // lewat H264BitrateController (src/core/h264_bitrate_controller.h di repo iot).
+    // Input options (mis. -r 25) datang dari timestampArgs() di atas.
+    ...pre,
+    '-f', 'h264', '-i', 'pipe:0',
+    // Remux, bukan transcode — device sudah encode H.264 di hardware (ESP32-P4).
+    // -c:v copy = pass-through NAL units apa adanya.
+    '-c:v', 'copy',
+    '-an',
+    ...post,
+  ];
+  if (process.env.TEST_MODE === '1') {
+    // Validate H264 remux without pushing anywhere. ffmpeg stderr shows errors.
+    return [...base, '-f', 'null', '-'];
+  }
+  return [...base, '-f', 'rtsp', '-rtsp_transport', 'tcp', mediamtxUrl(deviceId)];
+}
+
+function startFfmpeg(deviceId) {
+  const args = ffmpegArgs(deviceId);
+  const proc = spawn('ffmpeg', args);
+  proc.stderr.on('data', (d) => process.stderr.write(`[ffmpeg ${deviceId}] ${d}`));
+  proc.stdin.on('error', (err) => {
+    // EPIPE when ffmpeg dies unexpectedly — log and let proc 'exit' clean up.
+    console.error(`[ingest] ffmpeg stdin error for ${deviceId}: ${err.message}`);
+  });
+  proc.on('exit', (code) => {
+    console.log(`[ingest] ffmpeg for ${deviceId} exited (code=${code})`);
+    const s = sessions.get(deviceId);
+    if (s && s.proc === proc) sessions.delete(deviceId);
+  });
+  proc.on('error', (err) => {
+    console.error(`[ingest] ffmpeg for ${deviceId} failed to start: ${err.message}`);
+    sessions.delete(deviceId);
+  });
+  const dest = process.env.TEST_MODE === '1' ? 'null (TEST_MODE)' : mediamtxUrl(deviceId);
+  console.log(`[ingest] ffmpeg started for ${deviceId} -> ${dest}`);
+  return proc;
+}
+
+module.exports = { ffmpegArgs, startFfmpeg };
+
+const server = http.createServer((req, res) => {
+  const match = DEVICE_ID_RE.exec(req.url);
+  if (req.method !== 'POST' || !match) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const deviceId = match[1];
+  const recvTok = req.headers['x-ingest-token'];
+  if (!DISABLE_AUTH && recvTok !== INGEST_TOKEN) {
+    // Length-only diag (no secret in logs) to confirm token mismatch at runtime.
+    console.error(`[ingest] token mismatch for ${deviceId}: recv_len=${String(recvTok || '').length} expected_len=${String(INGEST_TOKEN || '').length}`);
+    res.writeHead(401).end('unauthorized');
+    return;
+  }
+  if (DISABLE_AUTH) console.warn(`[ingest] AUTH DISABLED via DISABLE_AUTH=1 (local test only)`);
+
+  let session = sessions.get(deviceId);
+  if (!session) {
+    session = { proc: startFfmpeg(deviceId), killTimer: null, activeReq: null, lastDataAt: 0 };
+    sessions.set(deviceId, session);
+  } else if (session.activeReq) {
+    const idleMs = Date.now() - (session.lastDataAt || 0);
+    if (idleMs < ZOMBIE_IDLE_MS) {
+      // Koneksi lama MASIH aktif nulis (data segar) — dua penulis sekaligus
+      // bakal bikin NAL interleaved/korup. Device reconnect-agresif harus retry.
+      console.log(`[ingest] ${deviceId} rejected — another connection actively streaming (idle ${idleMs}ms)`);
+      res.writeHead(409).end('already streaming from another connection');
+      return;
+    }
+    // Takeover: koneksi lama zombie (diam ≥ ZOMBIE_IDLE_MS — device v3 abort
+    // koneksi ber-stall lalu buka baru). Bunuh zombie-nya; stdin ffmpeg yang
+    // sama dilanjutkan koneksi baru (penulis mati = 0 byte, tanpa risiko
+    // interleaved). Device reconnect dgn encoder baru = mulai SPS+PPS+IDR,
+    // parser ffmpeg resync otomatis di start code.
+    console.log(`[ingest] ${deviceId} takeover — previous connection idle ${idleMs}ms`);
+    session.activeReq.isSuperseded = true;
+    session.activeReq.destroy();
+    if (session.killTimer) {
+      clearTimeout(session.killTimer);
+      session.killTimer = null;
+    }
+  } else if (session.killTimer) {
+    // ESP32 reconnected before kill timer fired - resume the same ffmpeg session.
+    clearTimeout(session.killTimer);
+    session.killTimer = null;
+    console.log(`[ingest] ${deviceId} reconnected - resuming ffmpeg`);
+  }
+  session.activeReq = req;
+  session.lastDataAt = Date.now();
+  console.log(`[ingest] ${deviceId} connected from ${req.socket.remoteAddress}`);
+
+  // Pegang referensi proc "milik" request ini secara langsung (bukan lewat
+  // sessions.get() tiap event) — supaya kalau ffmpeg mati di tengah jalan, kita
+  // tahu pasti itu proc yang sama, dan bisa maksa tutup koneksi HTTP ini (lihat
+  // onProcExit) alih-alih diam-diam mendrop chunk ke stdin yang sudah mati.
+  const myProc = session.proc;
+  let endedClean = false;
+
+  function onProcExit() {
+    if (endedClean) return;
+    console.log(`[ingest] ${deviceId} ffmpeg died mid-stream — closing connection so device reconnects`);
+    req.destroy();
+  }
+  myProc.once('exit', onProcExit);
+
+  req.on('data', (chunk) => {
+    const s0 = sessions.get(deviceId);
+    if (s0) s0.lastDataAt = Date.now();
+    if (process.env.DEBUG_FRAMES === '1') {
+      console.log(`[chunk ${deviceId}] ${chunk.length}B`);
+    }
+    if (!myProc.stdin.writable) return;
+    const ok = myProc.stdin.write(chunk);
+    if (!ok) {
+      // Backpressure: ffmpeg (atau RTSP output-nya ke mediamtx) lebih lambat
+      // dari input — jeda req sampai stdin ffmpeg siap nerima lagi, supaya Node
+      // gak numpuk buffer chunk di memori tanpa batas.
+      req.pause();
+      myProc.stdin.once('drain', () => req.resume());
+    }
+  });
+
+  req.on('end', () => {
+    // ESP32 sent the HTTP chunked terminator (0\r\n\r\n) — clean stream_stop.
+    endedClean = true;
+    myProc.removeListener('exit', onProcExit);
+    console.log(`[ingest] ${deviceId} stream ended (clean stop)`);
+    const s = sessions.get(deviceId);
+    if (s && s.proc === myProc) {
+      if (s.killTimer) clearTimeout(s.killTimer);
+      myProc.stdin.end();
+      sessions.delete(deviceId);
+    }
+    if (!res.writableEnded) res.end();
+  });
+
+  req.on('close', () => {
+    myProc.removeListener('exit', onProcExit);
+    if (endedClean) return;
+    if (req.isSuperseded) {
+      // Zombie yang dibunuh oleh takeover — JANGAN sentuh ownership session
+      // (activeReq sekarang milik koneksi baru; killTimer sudah di-clear).
+      console.log(`[ingest] ${deviceId} superseded connection closed`);
+      return;
+    }
+    // TCP dropped (WiFi glitch, device reset) — keep ffmpeg alive so mediamtx
+    // path stays up while ESP32 reconnects.
+    console.log(`[ingest] ${deviceId} TCP dropped — keeping ffmpeg for ${RECONNECT_WINDOW_MS / 1000}s`);
+    if (!res.writableEnded) res.end();
+    const s = sessions.get(deviceId);
+    if (s && s.proc === myProc) {
+      s.activeReq = null;
+      if (!s.killTimer) {
+        s.killTimer = setTimeout(() => {
+          const s2 = sessions.get(deviceId);
+          if (s2 && s2.proc === myProc) {
+            console.log(`[ingest] ${deviceId} no reconnect after ${RECONNECT_WINDOW_MS / 1000}s — stopping ffmpeg`);
+            myProc.stdin.end();
+            sessions.delete(deviceId);
+          }
+        }, RECONNECT_WINDOW_MS);
+      }
+    }
+  });
+});
+
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[ingest] listening on :${PORT} -> mediamtx at ${MEDIAMTX_HOST}:${MEDIAMTX_PORT} (reconnect window ${RECONNECT_WINDOW_MS / 1000}s)`);
+  });
+}
