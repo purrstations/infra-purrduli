@@ -10,8 +10,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # EMQX punya healthcheck (di bawah) — backend (publish MQTT) tunggu broker
+      # beneran started, bukan cuma proses hidup.
       mqtt:
-        condition: service_started
+        condition: service_healthy
     # Tidak expose port ke host — akses hanya via nginx (api.purrduli.tech → backend:4000).
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -42,6 +44,13 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
+    # Any HTTP response dari port sendiri = server hidup (fetch resolve di 404 pun).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - internal
 
@@ -53,6 +62,12 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - internal
 
@@ -149,6 +164,13 @@ services:
       - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
       - ./certbot/conf:/etc/letsencrypt:ro
+    healthcheck:
+      # Dokumentasi resmi EMQX: emqx ctl status exit 0 = broker running.
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     networks:
       - internal
 
@@ -184,6 +206,14 @@ services:
       - "8080:8080"                  # ESP32-P4 push H.264 ke sini
     depends_on:
       - mediamtx
+    # Node fetch ke port sendiri — GET / balik 404 pun server dianggap hidup
+    # (fetch cuma reject kalau koneksi gagal; sama filosofi dgn smoke.sh:88-90).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - internal
 
@@ -198,6 +228,12 @@ services:
       - ./nginx/web:/var/www/rotate:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
+    healthcheck:
+      # nginx -t = config parse valid + binary hidup (nginx:alpine gak punya curl).
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     networks:
       - internal
 
