@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Deploy dan rollback (rollback.yml) share group ini — tidak pernah jalan
+# paralel di VPS. Queue, bukan cancel, biar tidak ada deploy yang hilang.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -20,18 +26,8 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # Validasi key valid
+          # Validasi key valid — gagal di sini = deploy berhenti sebelum kena VPS
           ssh-keygen -l -f ~/.ssh/deploy_key
-
-      - name: Test SSH verbose
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-        run: |
-          ssh -vvv -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o PasswordAuthentication=no \
-            $VPS_USER@$VPS_HOST 'echo SSH_OK' 2>&1 || true
 
       - name: Deploy ke VPS
         env:
@@ -39,10 +35,10 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
+            -o StrictHostKeyChecking=accept-new \
             -o PasswordAuthentication=no \
             $VPS_USER@$VPS_HOST << 'ENDSSH'
-            set -e
+            set -eo pipefail
             cd /app/purrtein-infra
 
             BEFORE=$(git rev-parse HEAD)
@@ -58,31 +54,112 @@ jobs:
             echo "File berubah:"
             echo "$CHANGED"
 
+            # ── Health gate helper ──────────────────────────────────────
+            # Poll .State.Health sampai healthy. Service tanpa healthcheck
+            # dianggap OK saat running. Timeout = deploy merah (fail closed).
+            wait_healthy() {
+              local svc="$1" timeout="${2:-90}" elapsed=0 cid st
+              while true; do
+                cid=$(docker compose ps -q "$svc" 2>/dev/null || true)
+                if [ -z "$cid" ]; then
+                  echo "FATAL: container $svc tidak ditemukan/berhenti."
+                  return 1
+                fi
+                st=$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid")
+                case "$st" in
+                  "running healthy") echo "OK: $svc healthy"; return 0 ;;
+                  "running ")        echo "OK: $svc running (tanpa healthcheck)"; return 0 ;;
+                esac
+                if [ "$elapsed" -ge "$timeout" ]; then
+                  echo "FATAL: $svc belum healthy setelah ${timeout}s (state: $st)"
+                  docker compose logs --tail 30 "$svc" || true
+                  return 1
+                fi
+                sleep 3
+                elapsed=$((elapsed+3))
+              done
+            }
+
+            # ── Backup pre-deploy (keep-latest, atomic) ─────────────────
+            # Jalan SETELAH pull terkonfirmasi ada perubahan, SEBELUM sentuh
+            # container. Hapus lama dulu, tulis .tmp lalu mv (atomik: dump
+            # gagal = backup lama tetap utuh). Simpan single-file biar disk
+            # tidak numpuk.
+            mkdir -p /app/backups
+            set -a; . ./.env; set +a   # POSTGRES_USER / POSTGRES_DB
+
+            if docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+              echo "==> Backup postgres (keep-latest)..."
+              if docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "/app/backups/postgres-latest.sql.gz.tmp.$$"; then
+                rm -f /app/backups/postgres-latest.sql.gz
+                mv "/app/backups/postgres-latest.sql.gz.tmp.$$" /app/backups/postgres-latest.sql.gz
+                ls -lh /app/backups/postgres-latest.sql.gz
+              else
+                rm -f "/app/backups/postgres-latest.sql.gz.tmp.$$"
+                echo "FATAL: pg_dump gagal — deploy di-abort, container tidak disentuh."
+                exit 1
+              fi
+            else
+              echo "FATAL: postgres tidak ready — deploy di-abort."
+              exit 1
+            fi
+
+            echo "==> Backup redis (keep-latest)..."
+            REDIS_VOL=$(docker volume ls --format '{{.Name}}' | grep 'redis_data$' | head -1)
+            if [ -n "$REDIS_VOL" ]; then
+              if docker run --rm -v "$REDIS_VOL":/data:ro -v /app/backups:/backup alpine \
+                   tar czf "/backup/redis-latest.tgz.tmp.$$" -C / data; then
+                rm -f /app/backups/redis-latest.tgz
+                mv "/app/backups/redis-latest.tgz.tmp.$$" /app/backups/redis-latest.tgz
+                ls -lh /app/backups/redis-latest.tgz
+              else
+                rm -f "/app/backups/redis-latest.tgz.tmp.$$"
+                echo "FATAL: backup redis gagal — deploy di-abort."
+                exit 1
+              fi
+            else
+              echo "FATAL: volume redis_data tidak ditemukan — deploy di-abort."
+              exit 1
+            fi
+
+            # ── Redeploy ────────────────────────────────────────────────
             # full redeploy kalau docker-compose.yml berubah
             if echo "$CHANGED" | grep -q "^docker-compose"; then
               echo "==> Full redeploy..."
               docker compose pull
               docker compose up -d --build --remove-orphans
+              wait_healthy postgres 60
+              wait_healthy redis 60
+              wait_healthy mqtt 90
+              wait_healthy backend 180
+              wait_healthy h264-ingest 60
+              wait_healthy nginx 60
+              wait_healthy frontend 90
+              wait_healthy dashboard 90
             else
               # restart selektif
               if echo "$CHANGED" | grep -q "^nginx/"; then
                 echo "==> Reload nginx..."
-                docker compose exec nginx nginx -s reload
+                docker compose exec nginx nginx -t \
+                  && docker compose exec nginx nginx -s reload
               fi
 
               if echo "$CHANGED" | grep -q "^mediamtx/"; then
                 echo "==> Restart mediamtx..."
                 docker compose restart mediamtx
+                wait_healthy mediamtx 60
               fi
 
               if echo "$CHANGED" | grep -q "^emqx/"; then
                 echo "==> Restart mqtt..."
                 docker compose restart mqtt
+                wait_healthy mqtt 90
               fi
 
               if echo "$CHANGED" | grep -q "^h264-ingest-server/"; then
                 echo "==> Rebuild h264-ingest..."
                 docker compose up -d --build h264-ingest
+                wait_healthy h264-ingest 60
               fi
 
               if echo "$CHANGED" | grep -q "^certbot/"; then
@@ -91,21 +168,13 @@ jobs:
                 echo "==> Restart mqtt (re-read cert now that perms are fixed)..."
                 sleep 3   # let fix-cert-perms.sh finish before mqtt re-reads
                 docker compose restart mqtt
+                wait_healthy mqtt 90
               fi
             fi
 
             # health check
             echo "==> Verifikasi containers..."
-            sleep 5
             docker compose ps --format "table {{.Name}}\t{{.Status}}"
-
-            # gagal kalau ada container yang tidak running
-            UNHEALTHY=$(docker compose ps --format "{{.Name}} {{.Status}}" | grep -v "Up" | grep -v "running" || true)
-            if [ -n "$UNHEALTHY" ]; then
-              echo "PERINGATAN: container tidak sehat:"
-              echo "$UNHEALTHY"
-              exit 1
-            fi
 
             echo "Deploy selesai."
           ENDSSH
