@@ -9,7 +9,7 @@
   /* Full-bleed: tanpa border, tanpa teks, tanpa radius — murni video */
   .stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
   .stage video { position: absolute; top: 50%; left: 50%;
-    transform: translate(-50%, -50%) rotate(90deg); /* 90° searah jarum jam */
+    transform: translate(-50%, -50%) rotate(-90deg); /* 90° berlawanan jarum jam (kamera di-rotate +180° fisik dari posisi 90°) */
     object-fit: contain; /* seluruh frame terlihat, resolusi utuh, tanpa crop */ background: #000; }
 </style>
 </head>
