@@ -9,7 +9,7 @@
   /* Full-bleed: tanpa border, tanpa teks, tanpa radius — murni video */
   .stage { position: fixed; inset: 0; overflow: hidden; background: #000; }
   .stage video { position: absolute; top: 50%; left: 50%;
-    transform: translate(-50%, -50%) rotate(90deg); /* 90° CW — rotasi fisik 180° kamera ternyata mengembalikan orientasi kalibrasi awal, kompensasi tetap +90° */
+    transform: translate(-50%, -50%) rotate(-90deg); /* -90° (270°) — viewer lapor 90° terbalik 180°, kompensasi dibalik arah */
     object-fit: contain; /* seluruh frame terlihat, resolusi utuh, tanpa crop */ background: #000; }
 </style>
 </head>
