@@ -146,7 +146,10 @@ services:
       - internal
 
   mqtt:
-    image: emqx/emqx:latest
+    # Pin versi: `latest` + `docker compose pull` saat deploy bisa naik versi
+    # dan mengubah skema Mnesia (risiko user authn hilang). Naikkan versi
+    # secara sadar, satu commit.
+    image: emqx/emqx:5.8.4
     restart: unless-stopped
     env_file: .env
     # EMQX runs as uid 1000 (non-root) — it can't read certbot's default
@@ -163,6 +166,12 @@ services:
       - emqx_data:/opt/emqx/data
       - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      # Seed user built_in_database (dibuat oleh scripts/gen-emqx-bootstrap.sh).
+      # SENGAJA mount DIREKTORI, bukan file: kalau file-nya belum ada, Docker
+      # akan membuat DIREKTORI bernama auth-bootstrap.csv pada bind-mount file
+      # tunggal — EMQX lalu gagal membaca dan repo jadi kotor. Dengan mount
+      # direktori, file yang belum ada hanya memicu warning (EMQX tetap start).
+      - ./emqx:/opt/emqx/etc/extra:ro
       - ./certbot/conf:/etc/letsencrypt:ro
     healthcheck:
       # Dokumentasi resmi EMQX: emqx ctl status exit 0 = broker running.
