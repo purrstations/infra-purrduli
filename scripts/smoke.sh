@@ -78,6 +78,24 @@ else
   bad "broker belum started"
 fi
 
+# User built_in_database harus ada. Kalau 0, kredensial device hilang dan
+# device tak bisa connect — jalankan scripts/gen-emqx-bootstrap.sh lalu
+# recreate mqtt (lihat emqx/emqx.conf bagian authentication).
+USERS=$(dc exec -T mqtt emqx eval \
+  'length(mnesia:dirty_all_keys(emqx_authn_mnesia))' 2>/dev/null \
+  | tr -dc '0-9' | tail -c 8)if [ -n "$USERS" ] && [ "$USERS" -gt 0 ] 2>/dev/null; then
+  ok "authn built_in_database berisi $USERS user"
+else
+  bad "authn built_in_database kosong/tak terbaca — device tidak bisa login (jalankan scripts/gen-emqx-bootstrap.sh)"
+fi
+
+# File bootstrap harus ada; tanpa itu user tidak di-seed ulang saat restart.
+if dc exec -T mqtt test -f /opt/emqx/etc/extra/auth-bootstrap.csv 2>/dev/null; then
+  ok "auth-bootstrap.csv ter-mount"
+else
+  bad "auth-bootstrap.csv tidak ada di container (jalankan scripts/gen-emqx-bootstrap.sh)"
+fi
+
 # ── 5. mediamtx WHEP ─────────────────────────────────────────────────────
 info "mediamtx"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8889/ 2>/dev/null || echo 000)

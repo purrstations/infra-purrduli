@@ -4,3 +4,5 @@ certbot/www/
 .claude/settings.local.json
 REVIEW-*.md
 sample.h264
+# Berisi password plaintext hasil scripts/gen-emqx-bootstrap.sh
+emqx/auth-bootstrap.csv
