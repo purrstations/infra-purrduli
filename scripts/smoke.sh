@@ -83,7 +83,8 @@ fi
 # recreate mqtt (lihat emqx/emqx.conf bagian authentication).
 USERS=$(dc exec -T mqtt emqx eval \
   'length(mnesia:dirty_all_keys(emqx_authn_mnesia))' 2>/dev/null \
-  | tr -dc '0-9' | tail -c 8)if [ -n "$USERS" ] && [ "$USERS" -gt 0 ] 2>/dev/null; then
+  | tr -dc '0-9' | tail -c 8)
+if [ -n "$USERS" ] && [ "$USERS" -gt 0 ] 2>/dev/null; then
   ok "authn built_in_database berisi $USERS user"
 else
   bad "authn built_in_database kosong/tak terbaca — device tidak bisa login (jalankan scripts/gen-emqx-bootstrap.sh)"
