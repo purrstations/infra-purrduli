@@ -32,11 +32,19 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-# Muat .env tanpa mengeksekusinya sebagai shell script penuh.
-set -a
-# shellcheck disable=SC1091
-. ./.env
-set +a
+# Ambil HANYA var yang dibutuhkan — JANGAN source .env. Sourcing gagal total
+# kalau ada satu value mengandung karakter shell (mis. baris
+# `EMAIL_FROM=Purrstation <no-reply@purrduli.tech>`: `<` dibaca redirect),
+# dan sourcing berhenti di baris itu sehingga semua var sesudahnya kosong.
+env_get() {
+  grep -E "^$1=" ./.env | tail -1 | cut -d= -f2- \
+    | tr -d "\"'" | tr -d '\r' | sed 's/[[:space:]]*$//' || true
+}
+
+MQTT_USERNAME=$(env_get MQTT_USERNAME)
+MQTT_PASSWORD=$(env_get MQTT_PASSWORD)
+DEVICE_MQTT_PASSWORD=$(env_get DEVICE_MQTT_PASSWORD)
+DEVICE_MQTT_USERNAME=$(env_get DEVICE_MQTT_USERNAME)
 
 fail() { echo "❌ $1" >&2; exit 1; }
 
