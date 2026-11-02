@@ -34,12 +34,19 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=accept-new \
-            -o PasswordAuthentication=no \
-            $VPS_USER@$VPS_HOST << 'ENDSSH'
-            set -eo pipefail
-            cd /app/purrtein-infra
+          set -euo pipefail
+          # Script remote ditulis ke file lalu dikirim sebagai base64 di argumen,
+          # BUKAN lewat stdin ssh. Kalau lewat stdin: satu command yang membaca
+          # stdin (mis. `docker compose exec` saat pg_dump) menelan sisa script,
+          # shell kehabisan input, dan ssh keluar 0 padahal deploy baru selesai
+          # sebagian — fail-open. Itu yang terjadi di run 41391671954: berhenti
+          # tepat setelah backup postgres tanpa error apa pun.
+          # `ssh -n` menutup stdin remote supaya tidak ada command yang bisa
+          # menelannya lagi.
+          cat > /tmp/deploy-remote.sh <<'ENDSSH'
+          #!/usr/bin/env bash
+          set -eo pipefail
+          cd /app/purrtein-infra
 
             BEFORE=$(git rev-parse HEAD)
             git pull origin main
@@ -92,7 +99,7 @@ jobs:
             # yang membuat semua run 0fcbeb6..61d2733 gagal 15 detik.
             env_get() {
               grep -E "^$1=" ./.env | tail -1 | cut -d= -f2- \
-                | tr -d "\"'" | tr -d '\r' | sed 's/[[:space:]]*$//'
+                | tr -d "\"'" | tr -d '\r' | sed 's/[[:space:]]*$//' || true
             }
             POSTGRES_USER=$(env_get POSTGRES_USER)
             POSTGRES_DB=$(env_get POSTGRES_DB)
@@ -191,3 +198,10 @@ jobs:
 
             echo "Deploy selesai."
           ENDSSH
+
+          B64=$(base64 -w0 /tmp/deploy-remote.sh)
+          ssh -n -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=accept-new \
+            -o PasswordAuthentication=no \
+            "$VPS_USER@$VPS_HOST" \
+            "printf '%s' '$B64' | base64 -d > /tmp/purr-deploy.sh && bash /tmp/purr-deploy.sh; rc=\$?; rm -f /tmp/purr-deploy.sh; exit \$rc"
