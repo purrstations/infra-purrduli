@@ -86,7 +86,20 @@ jobs:
             # gagal = backup lama tetap utuh). Simpan single-file biar disk
             # tidak numpuk.
             mkdir -p /app/backups
-            set -a; . ./.env; set +a   # POSTGRES_USER / POSTGRES_DB
+            # Ambil HANYA var yang dipakai. JANGAN `source` .env: satu value
+            # berisi karakter shell (`<`, spasi, backtick) bikin baris itu
+            # syntax error dan deploy abort sebelum container disentuh — itu
+            # yang membuat semua run 0fcbeb6..61d2733 gagal 15 detik.
+            env_get() {
+              grep -E "^$1=" ./.env | tail -1 | cut -d= -f2- \
+                | tr -d "\"'" | tr -d '\r' | sed 's/[[:space:]]*$//'
+            }
+            POSTGRES_USER=$(env_get POSTGRES_USER)
+            POSTGRES_DB=$(env_get POSTGRES_DB)
+            if [ -z "$POSTGRES_USER" ] || [ -z "$POSTGRES_DB" ]; then
+              echo "FATAL: POSTGRES_USER/POSTGRES_DB kosong di .env — deploy di-abort."
+              exit 1
+            fi
 
             if docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
               echo "==> Backup postgres (keep-latest)..."
